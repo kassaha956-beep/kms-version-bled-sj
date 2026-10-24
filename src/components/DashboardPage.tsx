@@ -185,6 +185,27 @@ export default function DashboardPage({ currentLang, currentUser }: Props) {
     loadDashboard();
   }, [loadDashboard]);
 
+  // Synchronize on global refresh or when switching back to dashboard tab
+  useEffect(() => {
+    const handleRefresh = () => {
+      loadDashboard();
+      if (activeTab === 'reconciliation') {
+        loadReconLogs();
+      }
+    };
+    const handleTabActivated = (e: any) => {
+      if (e?.detail === 'dashboard') {
+        loadDashboard();
+      }
+    };
+    window.addEventListener('app:refresh', handleRefresh);
+    window.addEventListener('app:tabActivated', handleTabActivated);
+    return () => {
+      window.removeEventListener('app:refresh', handleRefresh);
+      window.removeEventListener('app:tabActivated', handleTabActivated);
+    };
+  }, [loadDashboard, loadReconLogs, activeTab]);
+
   useEffect(() => {
     if (activeTab === 'reconciliation') {
       loadReconLogs();
@@ -352,7 +373,10 @@ export default function DashboardPage({ currentLang, currentUser }: Props) {
 
           {/* Refresh Button */}
           <button
-            onClick={loadDashboard}
+            onClick={async () => {
+              if (api?.flushCache) await api.flushCache();
+              await loadDashboard();
+            }}
             disabled={loading}
             style={{
               display: 'inline-flex',

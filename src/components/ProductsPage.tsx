@@ -1177,6 +1177,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
 
       setIsProductModalOpen(false);
       fetchProducts();
+      window.dispatchEvent(new CustomEvent('products:updated'));
     } catch (err: any) {
       setAlert({ type: 'error', message: err.message || 'Erreur enregistrement produit' });
     }
@@ -1201,6 +1202,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
 
       setAlert({ type: 'success', message: t.productDeleted });
       fetchProducts();
+      window.dispatchEvent(new CustomEvent('products:updated'));
     } catch (err: any) {
       setAlert({ type: 'error', message: err.message || 'Erreur suppression produit' });
     }
@@ -1295,7 +1297,13 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <button
             type="button"
-            onClick={fetchProducts}
+            onClick={async () => {
+              if (window.electronAPI?.flushCache) await window.electronAPI.flushCache();
+              fetchProducts();
+              // Also notify POS and other pages to refresh product lists
+              window.dispatchEvent(new CustomEvent('products:updated'));
+              window.dispatchEvent(new CustomEvent('app:refresh'));
+            }}
             className="btn-secondary"
             title="Rafraîchir"
             style={{ display: 'flex', alignItems: 'center', gap: '6px' }}

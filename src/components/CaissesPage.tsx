@@ -92,14 +92,20 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
     caisse_id: 0,
     caisse_name: '',
     opening_balance: 0,
+    current_balance: 0,
     notes: ''
   });
 
   const [showCloseModal, setShowCloseModal] = useState(false);
   const [closeForm, setCloseForm] = useState({
     caisse_id: 0,
+    session_id: 0,
     caisse_name: '',
+    opening_balance: 0,
+    session_in: 0,
+    session_out: 0,
     expected_balance: 0,
+    current_balance: 0,
     actual_counted: '',
     notes: ''
   });
@@ -244,6 +250,28 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
       loadSessions();
     }
   }, [selectedCaisseId, typeFilter, categoryFilter, datePreset, startDate, endDate, pageSize, activeSubTab]);
+
+  // Real-time live synchronization (app:refresh & tab activation)
+  useEffect(() => {
+    const handleGlobalRefresh = () => {
+      loadCaisses();
+      loadStats();
+      loadCategories();
+      if (activeSubTab === 'transactions') loadTransactions(currentPage);
+      if (activeSubTab === 'sessions') loadSessions();
+    };
+    const handleTabActivated = (e: any) => {
+      if (e?.detail === 'caisses') {
+        handleGlobalRefresh();
+      }
+    };
+    window.addEventListener('app:refresh', handleGlobalRefresh);
+    window.addEventListener('app:tabActivated', handleTabActivated);
+    return () => {
+      window.removeEventListener('app:refresh', handleGlobalRefresh);
+      window.removeEventListener('app:tabActivated', handleTabActivated);
+    };
+  }, [activeSubTab, currentPage]);
 
   // Format currency
   const formatMoney = (val: number | string | undefined | null) => {
@@ -404,7 +432,8 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
     setOpenForm({
       caisse_id: caisse.id,
       caisse_name: caisse.name,
-      opening_balance: caisse.current_balance || 0,
+      opening_balance: 0,
+      current_balance: Number(caisse.current_balance) || 0,
       notes: ''
     });
     setShowOpenModal(true);
@@ -415,6 +444,9 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
     if (!window.electronAPI?.openCaisseSession) return;
 
     try {
+      if (window.electronAPI?.flushCache) {
+        await window.electronAPI.flushCache();
+      }
       const res = await window.electronAPI.openCaisseSession({
         caisse_id: openForm.caisse_id,
         user_id: currentUser?.id,
@@ -427,6 +459,7 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
         setSuccessMsg(`Caisse "${openForm.caisse_name}" ouverte avec succès !`);
         setShowOpenModal(false);
         await Promise.all([loadCaisses(), loadStats()]);
+        window.dispatchEvent(new CustomEvent('app:refresh'));
       } else {
         setErrorMsg(res.message || 'Impossible d’ouvrir la caisse');
       }
@@ -436,11 +469,22 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
   };
 
   const handleOpenCloseModal = (caisse: any) => {
+    const act = caisse.active_session;
+    const openBal = act?.opening_balance ? Number(act.opening_balance) : 0;
+    const sessIn = act?.session_in ? Number(act.session_in) : (caisse.today_in || 0);
+    const sessOut = act?.session_out ? Number(act.session_out) : (caisse.today_out || 0);
+    const drawerExp = act?.drawer_expected !== undefined ? Number(act.drawer_expected) : (openBal + sessIn - sessOut);
+
     setCloseForm({
       caisse_id: caisse.id,
+      session_id: act?.id || 0,
       caisse_name: caisse.name,
-      expected_balance: caisse.current_balance || 0,
-      actual_counted: String(caisse.current_balance || 0),
+      opening_balance: openBal,
+      session_in: sessIn,
+      session_out: sessOut,
+      expected_balance: drawerExp,
+      current_balance: Number(caisse.current_balance) || 0,
+      actual_counted: String(drawerExp),
       notes: ''
     });
     setShowCloseModal(true);
@@ -457,15 +501,20 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
     }
 
     try {
+      if (window.electronAPI?.flushCache) {
+        await window.electronAPI.flushCache();
+      }
       const res = await window.electronAPI.closeCaisseSession({
         caisse_id: closeForm.caisse_id,
+        session_id: closeForm.session_id,
+        closing_balance_actual: counted,
         actual_balance: counted,
         notes: closeForm.notes,
         user_name: currentUser?.full_name || currentUser?.username || 'Caissier'
       });
 
       if (res.success) {
-        const diff = res.discrepancy || 0;
+        const diff = (res as any).discrepancy !== undefined ? (res as any).discrepancy : ((res as any).difference || 0);
         const diffText = diff === 0 
           ? 'Caisse équilibrée sans écart (0 DA).' 
           : diff > 0 
@@ -475,6 +524,7 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
         setSuccessMsg(`Caisse "${closeForm.caisse_name}" clôturée avec succès. ${diffText}`);
         setShowCloseModal(false);
         await Promise.all([loadCaisses(), loadStats(), loadSessions()]);
+        window.dispatchEvent(new CustomEvent('app:refresh'));
       } else {
         setErrorMsg(res.message || 'Impossible de clôturer la caisse');
       }
@@ -762,7 +812,13 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
 
           <button 
             type="button"
-            onClick={() => { loadCaisses(); loadStats(); loadCategories(); if (activeSubTab === 'transactions') loadTransactions(); }}
+            onClick={async () => {
+              if (window.electronAPI?.flushCache) await window.electronAPI.flushCache();
+              await Promise.all([loadCaisses(), loadStats(), loadCategories()]);
+              if (activeSubTab === 'transactions') loadTransactions();
+              if (activeSubTab === 'sessions') loadSessions();
+              window.dispatchEvent(new CustomEvent('app:refresh'));
+            }}
             className="btn-secondary"
             style={{ padding: '9px 12px' }}
             title="Rafraîchir"
@@ -1964,6 +2020,12 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
             </div>
 
             <form onSubmit={handleConfirmOpenCaisse}>
+              {/* Caisse Total Balance */}
+              <div style={{ background: '#f0fdf4', padding: '10px 14px', borderRadius: '10px', marginBottom: '14px', border: '1px solid #86efac', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: '11px', color: '#15803d', fontWeight: 700 }}>💰 Solde Actuel de la Caisse</div>
+                <div style={{ fontSize: '16px', fontWeight: 800, color: '#15803d' }}>{formatMoney(openForm.current_balance)}</div>
+              </div>
+
               <div style={{ marginBottom: '14px' }}>
                 <label style={{ fontSize: '12px', fontWeight: 700, color: '#475569', display: 'block', marginBottom: '6px' }}>
                   Fond de caisse initial (DA)
@@ -2012,7 +2074,7 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
       {/* ========================================================= */}
       {showCloseModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: '16px' }}>
-          <div style={{ background: '#ffffff', borderRadius: '16px', maxWidth: '460px', width: '100%', padding: '24px', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)' }}>
+          <div style={{ background: '#ffffff', borderRadius: '16px', maxWidth: '480px', width: '100%', padding: '24px', boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)', maxHeight: '92vh', overflowY: 'auto' }}>
             
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -2025,18 +2087,33 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
             </div>
 
             <form onSubmit={handleConfirmCloseCaisse}>
-              {/* Solde Théorique */}
-              <div style={{ background: '#f8fafc', padding: '12px 16px', borderRadius: '10px', marginBottom: '14px', border: '1px solid #e2e8f0' }}>
-                <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>{t.expectedBalance}</div>
-                <div style={{ fontSize: '20px', fontWeight: 800, color: '#0f172a' }}>
-                  {formatMoney(closeForm.expected_balance)}
+              {/* Caisse Total Balance */}
+              <div style={{ background: '#f0fdf4', padding: '10px 14px', borderRadius: '10px', marginBottom: '10px', border: '1px solid #86efac', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ fontSize: '11px', color: '#15803d', fontWeight: 700 }}>💰 Solde Total de la Caisse</div>
+                <div style={{ fontSize: '16px', fontWeight: 800, color: '#15803d' }}>{formatMoney(closeForm.current_balance)}</div>
+              </div>
+
+              {/* Session Breakdown */}
+              <div style={{ background: '#f8fafc', padding: '12px 14px', borderRadius: '10px', marginBottom: '14px', border: '1px solid #e2e8f0' }}>
+                <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 700, marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Détail de la session</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                  <div style={{ fontSize: '11px', color: '#475569' }}>Fond d'ouverture :</div>
+                  <div style={{ fontSize: '12px', fontWeight: 700, color: '#0f172a', textAlign: 'right' }}>{formatMoney(closeForm.opening_balance)}</div>
+                  <div style={{ fontSize: '11px', color: '#475569' }}>Encaissements session :</div>
+                  <div style={{ fontSize: '12px', fontWeight: 700, color: '#16a34a', textAlign: 'right' }}>+{formatMoney(closeForm.session_in)}</div>
+                  <div style={{ fontSize: '11px', color: '#475569' }}>Décaissements session :</div>
+                  <div style={{ fontSize: '12px', fontWeight: 700, color: '#dc2626', textAlign: 'right' }}>-{formatMoney(closeForm.session_out)}</div>
+                </div>
+                <div style={{ borderTop: '1px solid #e2e8f0', marginTop: '8px', paddingTop: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 700 }}>Attendu en tiroir :</div>
+                  <div style={{ fontSize: '15px', fontWeight: 800, color: '#0f172a' }}>{formatMoney(closeForm.expected_balance)}</div>
                 </div>
               </div>
 
               {/* Saisie Compté Réel */}
               <div style={{ marginBottom: '14px' }}>
                 <label style={{ fontSize: '12px', fontWeight: 700, color: '#475569', display: 'block', marginBottom: '6px' }}>
-                  {t.actualCounted} (DA) *
+                  {t.actualCounted} — Montant compté dans le tiroir (DA) *
                 </label>
                 <input
                   type="number"
@@ -2044,8 +2121,12 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
                   value={closeForm.actual_counted}
                   onChange={(e) => setCloseForm({ ...closeForm, actual_counted: e.target.value })}
                   required
-                  style={{ width: '100%', padding: '9px 12px', fontSize: '14px', fontWeight: 700, border: '2px solid #cbd5e1', borderRadius: '8px' }}
+                  autoFocus
+                  style={{ width: '100%', padding: '10px 14px', fontSize: '18px', fontWeight: 700, border: '2px solid #3b82f6', borderRadius: '8px', outline: 'none', boxSizing: 'border-box' }}
                 />
+                <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>
+                  💡 Modifiez ce chiffre si le compte physique diffère — l'écart sera ajusté automatiquement.
+                </div>
               </div>
 
               {/* Visualisation Écart Instantané */}
@@ -2055,15 +2136,20 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
                   background: parseFloat(closeForm.actual_counted) === closeForm.expected_balance ? '#f0fdf4' : '#fffbeb',
                   border: '1px solid ' + (parseFloat(closeForm.actual_counted) === closeForm.expected_balance ? '#86efac' : '#fcd34d')
                 }}>
-                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#475569' }}>{t.cashDifference} calculé :</div>
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>{t.cashDifference} calculé :</div>
                   <div style={{ 
                     fontSize: '16px', fontWeight: 800, 
                     color: (parseFloat(closeForm.actual_counted) - closeForm.expected_balance) === 0 ? '#16a34a' : (parseFloat(closeForm.actual_counted) - closeForm.expected_balance) > 0 ? '#0284c7' : '#dc2626'
                   }}>
                     {parseFloat(closeForm.actual_counted) - closeForm.expected_balance === 0 
-                      ? 'Aucun écart (Caisse parfaite)' 
+                      ? '✅ Aucun écart (Caisse parfaite)' 
                       : (parseFloat(closeForm.actual_counted) - closeForm.expected_balance > 0 ? '+' : '') + formatMoney(parseFloat(closeForm.actual_counted) - closeForm.expected_balance)}
                   </div>
+                  {parseFloat(closeForm.actual_counted) !== closeForm.expected_balance && (
+                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
+                      Nouveau solde caisse après clôture : <strong>{formatMoney(closeForm.current_balance + (parseFloat(closeForm.actual_counted) - closeForm.expected_balance))}</strong>
+                    </div>
+                  )}
                 </div>
               )}
 

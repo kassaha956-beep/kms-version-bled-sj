@@ -18,6 +18,7 @@
   "build": {
     "appId": "com.imatechx.app",
     "productName": "imatechx",
+    "npmRebuild": false,
     "directories": {
       "output": "release"
     },

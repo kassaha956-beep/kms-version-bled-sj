@@ -482,6 +482,17 @@ function setupIpcHandlers() {
     }
   });
 
+  // Flush Cache IPC Handler
+  ipcMain.handle('cache:flush', async () => {
+    try {
+      appCache.flush();
+      return { success: true };
+    } catch (err) {
+      console.error('Error flushing cache:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
   // Auth: Update Account Profile & Password
   ipcMain.handle('auth:updateAccount', async (event, { userId, fullName, currentPassword, newPassword }) => {
     try {
@@ -1410,12 +1421,8 @@ function setupIpcHandlers() {
   // PRODUCTS, UNITS & SUPPLIER COMPARISON IPC
   // ==========================================
 
-  // ─── Dedicated POS endpoint: full catalogue, all units, cached ───────────────
+  // ─── Dedicated POS endpoint: full catalogue, all units (real-time live fetch) ───────────────
   ipcMain.handle('products:getForPOS', async () => {
-    const KEY = 'products:pos_all';
-    const cached = appCache.get(KEY);
-    if (cached) return cached;
-
     try {
       const rows = db.prepare(`
         SELECT
@@ -1442,9 +1449,7 @@ function setupIpcHandlers() {
       }
 
       const products = rows.map(p => ({ ...p, units: unitsByProduct[p.id] || [] }));
-      const result = { success: true, products, totalCount: products.length };
-      appCache.set(KEY, result, TTL.PRODUCTS_POS);
-      return result;
+      return { success: true, products, totalCount: products.length };
     } catch (err) {
       console.error('Error in products:getForPOS:', err);
       return { success: false, message: err.message, products: [] };
@@ -2873,12 +2878,8 @@ function setupIpcHandlers() {
   // MULTI-CAISSE & TRANSACTIONS IPC HANDLERS
   // ==========================================
 
-  // 1. Get all caisses with real-time stats
+  // 1. Get all caisses with real-time stats (no cache)
   ipcMain.handle('caisses:getAll', async () => {
-    const KEY = 'caisses:all';
-    const cached = appCache.get(KEY);
-    if (cached) return cached;
-
     try {
       const caisses = db.prepare(`
         SELECT c.*, u.full_name as assigned_user_name
@@ -2889,13 +2890,37 @@ function setupIpcHandlers() {
 
       const today = new Date().toISOString().slice(0, 10);
 
-      // Enhance each caisse with active session and today's movements
+      // Enhance each caisse with active session and movements
       const enriched = caisses.map(c => {
         const activeSession = db.prepare(`
           SELECT * FROM caisse_sessions 
           WHERE caisse_id = ? AND status = 'open' 
           ORDER BY id DESC LIMIT 1
         `).get(c.id);
+
+        let sessionIn = 0;
+        let sessionOut = 0;
+        let drawerExpected = c.current_balance;
+
+        if (activeSession) {
+          const inRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) as total 
+            FROM caisse_transactions 
+            WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+              AND type IN ('in', 'transfer_in')
+          `).get(activeSession.id, c.id, activeSession.opened_at);
+          sessionIn = inRow ? inRow.total : 0;
+
+          const outRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) as total 
+            FROM caisse_transactions 
+            WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+              AND type IN ('out', 'transfer_out')
+          `).get(activeSession.id, c.id, activeSession.opened_at);
+          sessionOut = outRow ? outRow.total : 0;
+
+          drawerExpected = (parseFloat(activeSession.opening_balance) || 0) + sessionIn - sessionOut;
+        }
 
         const todayIn = db.prepare(`
           SELECT COALESCE(SUM(amount), 0) as total 
@@ -2919,16 +2944,19 @@ function setupIpcHandlers() {
 
         return {
           ...c,
-          active_session: activeSession || null,
+          active_session: activeSession ? {
+            ...activeSession,
+            session_in: sessionIn,
+            session_out: sessionOut,
+            drawer_expected: drawerExpected
+          } : null,
           today_in: todayIn,
           today_out: todayOut,
           total_transactions: totalTransactions
         };
       });
 
-      const result = { success: true, caisses: enriched };
-      appCache.set(KEY, result, TTL.CAISSES);
-      return result;
+      return { success: true, caisses: enriched };
     } catch (err) {
       console.error('Error in caisses:getAll:', err);
       return { success: false, message: err.message, caisses: [] };
@@ -3053,7 +3081,7 @@ function setupIpcHandlers() {
     }
   });
 
-  // 6. Open session
+  // 6. Open session (can open at any time with initial cash float)
   ipcMain.handle('caisses:openSession', async (event, data) => {
     try {
       const { caisse_id, opening_balance = 0, user_name = 'Caissier', notes = '' } = data;
@@ -3072,26 +3100,23 @@ function setupIpcHandlers() {
           VALUES (?, ?, ?, ?, 'open', ?)
         `).run(caisse_id, user_name, now, openAmount, notes);
 
-        const newBal = caisse.current_balance + openAmount;
+        // Keep current caisse balance unchanged: opening float is placed into the drawer
         db.prepare(`
           UPDATE caisses 
-          SET status = 'open', last_opened_at = ?, current_balance = ? 
+          SET status = 'open', last_opened_at = ? 
           WHERE id = ?
-        `).run(now, newBal, caisse_id);
+        `).run(now, caisse_id);
 
-        if (openAmount > 0) {
-          let fondCat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Fond de Caisse'").get();
-          db.prepare(`
-            INSERT INTO caisse_transactions (caisse_id, session_id, type, amount, category_id, category_name, reference, description, payment_method, date, user_name, balance_after)
-            VALUES (?, ?, 'in', ?, ?, 'Fond de Caisse', ?, 'Apport fond de caisse ouverture', 'especes', ?, ?, ?)
-          `).run(caisse_id, sessRes.lastInsertRowid, openAmount, fondCat ? fondCat.id : null, 'SESS-' + sessRes.lastInsertRowid, now, user_name, newBal);
-        }
-
-        db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(user_name, `Ouverture session caisse: ${caisse.name}`);
+        db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(
+          user_name, 
+          `Ouverture session caisse: ${caisse.name} (Fond de caisse initial: ${openAmount.toFixed(2)} DA)`
+        );
         return sessRes.lastInsertRowid;
       });
 
       const sessId = openTx();
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('dashboard:');
       return { success: true, sessionId: sessId };
     } catch (err) {
       console.error('Error opening session:', err);
@@ -3099,61 +3124,129 @@ function setupIpcHandlers() {
     }
   });
 
-  // 7. Close session
+  // 7. Close session (can close at any time, see what is now in drawer, adjust/correct figure, update caisse balance)
   ipcMain.handle('caisses:closeSession', async (event, data) => {
     try {
-      const { caisse_id, session_id, closing_balance_actual, notes = '', user_name = 'Caissier' } = data;
+      const { 
+        caisse_id, 
+        session_id, 
+        closing_balance_actual, 
+        actual_balance, 
+        notes = '', 
+        user_name = 'Caissier' 
+      } = data;
       const caisse = db.prepare('SELECT * FROM caisses WHERE id = ?').get(caisse_id);
       if (!caisse) return { success: false, message: 'Caisse introuvable' };
 
+      // Find active session
+      let session = null;
+      if (session_id) {
+        session = db.prepare('SELECT * FROM caisse_sessions WHERE id = ?').get(session_id);
+      }
+      if (!session) {
+        session = db.prepare("SELECT * FROM caisse_sessions WHERE caisse_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(caisse_id);
+      }
+
       const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
-      const actual = Number(closing_balance_actual) || 0;
-      const expected = Number(caisse.current_balance) || 0;
-      const diff = actual - expected;
+
+      // Compute theoretical drawer amount during this session
+      let sessionIn = 0;
+      let sessionOut = 0;
+      let openingBal = 0;
+
+      if (session) {
+        openingBal = parseFloat(session.opening_balance) || 0;
+        const inRow = db.prepare(`
+          SELECT COALESCE(SUM(amount), 0) as total 
+          FROM caisse_transactions 
+          WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+            AND type IN ('in', 'transfer_in')
+        `).get(session.id, caisse_id, session.opened_at);
+        sessionIn = inRow ? inRow.total : 0;
+
+        const outRow = db.prepare(`
+          SELECT COALESCE(SUM(amount), 0) as total 
+          FROM caisse_transactions 
+          WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+            AND type IN ('out', 'transfer_out')
+        `).get(session.id, caisse_id, session.opened_at);
+        sessionOut = outRow ? outRow.total : 0;
+      }
+
+      // Theoretical cash in the till right now = starting float + all cash in - all cash out
+      const expected = openingBal + sessionIn - sessionOut;
+      const actualInput = closing_balance_actual !== undefined ? closing_balance_actual : actual_balance;
+      const actual = (actualInput !== undefined && actualInput !== '' && !isNaN(Number(actualInput))) 
+        ? Number(actualInput) 
+        : expected;
+      const diff = Math.round((actual - expected) * 100) / 100;
 
       const closeTx = db.transaction(() => {
-        // Close session
-        db.prepare(`
-          UPDATE caisse_sessions 
-          SET closed_at = ?, closing_balance_expected = ?, closing_balance_actual = ?, difference = ?, status = 'closed', notes = COALESCE(notes || '', '') || ' ' || ?
-          WHERE id = ?
-        `).run(now, expected, actual, diff, notes, session_id);
+        const sessId = session ? session.id : null;
 
-        // If there is an ecart, create adjustment transaction so theoretical matches physical
+        if (sessId) {
+          // Close session
+          db.prepare(`
+            UPDATE caisse_sessions 
+            SET closed_at = ?, closing_balance_expected = ?, closing_balance_actual = ?, difference = ?, status = 'closed', notes = COALESCE(notes || '', '') || ' ' || ?
+            WHERE id = ?
+          `).run(now, expected, actual, diff, notes, sessId);
+        }
+
+        // If there is an ecart (discrepancy / correction), insert an adjustment transaction.
+        // The SQLite trigger 'trg_caisse_transactions_ai' will automatically update caisses.current_balance!
         if (diff !== 0) {
-          const adjCat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Ajustement Écart de Caisse'").get();
+          let adjCat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Ajustement Écart de Caisse'").get();
+          if (!adjCat) {
+            const insCat = db.prepare("INSERT INTO caisse_transaction_categories (name, type, color, icon, description, is_system) VALUES ('Ajustement Écart de Caisse', 'both', '#f59e0b', 'alert-triangle', 'Ajustement lors de la clôture', 1)").run();
+            adjCat = { id: insCat.lastInsertRowid };
+          }
           const adjType = diff > 0 ? 'in' : 'out';
           const adjAmount = Math.abs(diff);
 
           db.prepare(`
-            INSERT INTO caisse_transactions (caisse_id, session_id, type, amount, category_id, category_name, reference, description, payment_method, date, user_name, balance_after)
-            VALUES (?, ?, ?, ?, ?, 'Ajustement Écart de Caisse', ?, ?, 'especes', ?, ?, ?)
+            INSERT INTO caisse_transactions (caisse_id, session_id, type, amount, category_id, category_name, reference, description, payment_method, date, user_name)
+            VALUES (?, ?, ?, ?, ?, 'Ajustement Écart de Caisse', ?, ?, 'especes', ?, ?)
           `).run(
             caisse_id, 
-            session_id, 
+            sessId, 
             adjType, 
             adjAmount, 
             adjCat ? adjCat.id : null, 
-            'CLOT-' + session_id, 
-            `Écart de caisse clôture (${diff > 0 ? '+' : ''}${diff.toFixed(2)})`, 
+            'CLOT-' + (sessId || Date.now()), 
+            `Écart de caisse clôture (${diff > 0 ? '+' : ''}${diff.toFixed(2)} DA) - ${notes || 'Ajustement comptage'}`, 
             now, 
-            user_name, 
-            actual
+            user_name
           );
         }
 
-        // Update caisse
+        // Update caisse status to closed
         db.prepare(`
           UPDATE caisses 
-          SET status = 'closed', last_closed_at = ?, current_balance = ? 
+          SET status = 'closed', last_closed_at = ?
           WHERE id = ?
-        `).run(now, actual, caisse_id);
+        `).run(now, caisse_id);
 
-        db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(user_name, `Clôture session caisse: ${caisse.name} (Écart: ${diff.toFixed(2)})`);
+        db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(
+          user_name, 
+          `Clôture session caisse: ${caisse.name} (Attendu: ${expected.toFixed(2)} DA, Réel: ${actual.toFixed(2)} DA, Écart: ${diff.toFixed(2)} DA)`
+        );
       });
 
       closeTx();
-      return { success: true, difference: diff, actual, expected };
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('dashboard:');
+
+      return { 
+        success: true, 
+        difference: diff, 
+        discrepancy: diff, 
+        actual, 
+        expected,
+        session_in: sessionIn,
+        session_out: sessionOut,
+        opening_balance: openingBal
+      };
     } catch (err) {
       console.error('Error closing session:', err);
       return { success: false, message: err.message };
@@ -3358,9 +3451,6 @@ function setupIpcHandlers() {
           ? caisse.current_balance + numAmount 
           : caisse.current_balance - numAmount;
 
-        // Update caisse balance
-        db.prepare('UPDATE caisses SET current_balance = ? WHERE id = ?').run(newBalance, caisse_id);
-
         // Fetch active session if any
         const activeSess = db.prepare("SELECT id FROM caisse_sessions WHERE caisse_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(caisse_id);
         const sessId = activeSess ? activeSess.id : null;
@@ -3432,11 +3522,7 @@ function setupIpcHandlers() {
         const fromBal = fromCaisse.current_balance - numAmount;
         const toBal = toCaisse.current_balance + numAmount;
 
-        // Update balances
-        db.prepare('UPDATE caisses SET current_balance = ? WHERE id = ?').run(fromBal, from_caisse_id);
-        db.prepare('UPDATE caisses SET current_balance = ? WHERE id = ?').run(toBal, to_caisse_id);
-
-        // Record debit on source caisse
+        // Record debit on source caisse (SQLite trigger trg_caisse_transactions_ai auto-deducts)
         db.prepare(`
           INSERT INTO caisse_transactions (
             caisse_id, destination_caisse_id, type, amount, category_id, category_name, 
@@ -3483,18 +3569,7 @@ function setupIpcHandlers() {
       if (!tx) return { success: false, message: 'Transaction introuvable' };
 
       const deleteTx = db.transaction(() => {
-        const caisse = db.prepare('SELECT * FROM caisses WHERE id = ?').get(tx.caisse_id);
-        if (caisse) {
-          // Reverse balance effect
-          let reversedBal = caisse.current_balance;
-          if (tx.type === 'in' || tx.type === 'transfer_in') {
-            reversedBal -= tx.amount;
-          } else if (tx.type === 'out' || tx.type === 'transfer_out') {
-            reversedBal += tx.amount;
-          }
-          db.prepare('UPDATE caisses SET current_balance = ? WHERE id = ?').run(reversedBal, tx.caisse_id);
-        }
-
+        // SQLite trigger trg_caisse_transactions_ad automatically reverses caisses.current_balance!
         db.prepare('DELETE FROM caisse_transactions WHERE id = ?').run(id);
         db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run('System', `Annulation transaction #${id} (${tx.type}: ${tx.amount} DA)`);
       });
@@ -3597,12 +3672,8 @@ function setupIpcHandlers() {
     }
   });
 
-  // 17. Direct SQL KPI & Statistics Dashboard
+  // 17. Direct SQL KPI & Statistics Dashboard (real-time live fetch, no cache)
   ipcMain.handle('caisses:getStats', async (event, filters = {}) => {
-    const KEY = cacheKey('caisses:stats', filters);
-    const cached = appCache.get(KEY);
-    if (cached) return cached;
-
     try {
       const { caisse_id = 'all', datePreset = 'all', startDate = '', endDate = '' } = filters;
 
@@ -3715,14 +3786,11 @@ function setupIpcHandlers() {
           categoryBreakdown
         }
       };
-      appCache.set(KEY, result, TTL.CAISSES);
-      return result;
     } catch (err) {
       console.error('Error in caisses:getStats:', err);
       return { success: false, message: err.message, stats: {} };
     }
   });
-}
 
 
 
@@ -4202,10 +4270,6 @@ function setupIpcHandlers() {
   // HIGH-PERFORMANCE PRECOMPUTED STATISTICS & DASHBOARD (TRIGGERS + SUMMARY TABLES)
   // -------------------------------------------------------------
   const fetchStatsDashboard = async (filters = {}) => {
-    const KEY = cacheKey('dashboard:stats', filters);
-    const cached = appCache.get(KEY);
-    if (cached) return cached;
-
     try {
       const { date_from, date_to } = filters;
       let dateWhere = '';
@@ -4375,8 +4439,6 @@ function setupIpcHandlers() {
         lastUpdated: new Date().toISOString(),
         lastReconciliation: lastRecon || null
       };
-      appCache.set(KEY, result, TTL.DASHBOARD);
-      return result;
     } catch (err) {
       console.error('Error in fetchStatsDashboard:', err);
       return { success: false, message: err.message };
@@ -4849,4 +4911,4 @@ function setupIpcHandlers() {
       return { success: false, message: err.message };
     }
   });
-
+}

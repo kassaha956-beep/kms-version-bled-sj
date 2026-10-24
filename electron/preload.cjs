@@ -121,4 +121,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getFlexyTransactions: (params) => ipcRenderer.invoke('services:getFlexyTransactions', params),
   deleteFlexyTransaction: (id) => ipcRenderer.invoke('services:deleteFlexy', id),
   testFlexyApi: (config) => ipcRenderer.invoke('services:testApi', config),
+
+  // Global cache flush
+  flushCache: () => ipcRenderer.invoke('cache:flush'),
 });

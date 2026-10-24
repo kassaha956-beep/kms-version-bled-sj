@@ -116,7 +116,7 @@ declare global {
       updateCaisse: (data: any) => Promise<{ success: boolean; message?: string }>;
       deleteCaisse: (id: number) => Promise<{ success: boolean; message?: string }>;
       openCaisseSession: (data: any) => Promise<{ success: boolean; sessionId?: number; message?: string }>;
-      closeCaisseSession: (data: any) => Promise<{ success: boolean; discrepancy?: number; message?: string }>;
+      closeCaisseSession: (data: any) => Promise<{ success: boolean; discrepancy?: number; difference?: number; actual?: number; expected?: number; message?: string; [key: string]: any }>;
       getCaisseSessions: (params?: any) => Promise<{ success: boolean; sessions?: any[]; message?: string }>;
       getCaisseTransactions: (filters?: any) => Promise<{ success: boolean; transactions?: any[]; totalCount?: number; totalPages?: number; currentPage?: number; limit?: number; message?: string }>;
       createCaisseTransaction: (data: any) => Promise<{ success: boolean; id?: number; newBalance?: number; message?: string }>;
@@ -148,6 +148,7 @@ declare global {
       getFlexyTransactions: (params?: any) => Promise<{ success: boolean; transactions?: any[]; stats?: any; message?: string }>;
       deleteFlexyTransaction: (id: number) => Promise<{ success: boolean; message?: string }>;
       testFlexyApi: (config?: any) => Promise<{ success: boolean; message?: string; status?: number; data?: any }>;
+      flushCache?: () => Promise<{ success: boolean; message?: string }>;
     };
   }
 }
@@ -164,6 +165,7 @@ export default function App() {
       next.add(activeTab);
       return next;
     });
+    window.dispatchEvent(new CustomEvent('app:tabActivated', { detail: activeTab }));
   }, [activeTab]);
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
     const saved = localStorage.getItem('app_sidebar_open');
@@ -191,15 +193,21 @@ export default function App() {
   const [showRoleModal, setShowRoleModal] = useState(false);
   const [roleModalTargetUser, setRoleModalTargetUser] = useState<any>(null);
 
-  // Load users from SQLite
+  // Load users and trigger global data refresh & cache flush
   const reloadData = async () => {
-    if (window.electronAPI?.getUsers) {
-      try {
+    try {
+      if (window.electronAPI?.flushCache) {
+        await window.electronAPI.flushCache();
+      }
+      if (window.electronAPI?.getUsers) {
         const us = await window.electronAPI.getUsers();
         if (us && Array.isArray(us)) setUsersList(us);
-      } catch (err) {
-        console.error('Error fetching SQLite users:', err);
       }
+      // Dispatch both events: general refresh + specific products refresh for POS
+      window.dispatchEvent(new CustomEvent('app:refresh'));
+      window.dispatchEvent(new CustomEvent('products:updated'));
+    } catch (err) {
+      console.error('Error reloading app data & flushing cache:', err);
     }
   };
 
@@ -263,6 +271,15 @@ export default function App() {
               <img 
                 src={appLogo} 
                 alt="imatechx logo" 
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  if (!target.getAttribute('data-fallback')) {
+                    target.setAttribute('data-fallback', 'true');
+                    target.src = './app-logo.png';
+                  } else {
+                    target.style.display = 'none';
+                  }
+                }}
                 style={{ 
                   width: '92px', 
                   height: '92px', 
@@ -366,7 +383,20 @@ export default function App() {
         <div style={{ padding: '16px 18px', borderBottom: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <div style={{ width: '40px', height: '40px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, overflow: 'hidden' }}>
-              <img src={appLogo} alt="imatechx" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+              <img 
+                src={appLogo} 
+                alt="imatechx" 
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  if (!target.getAttribute('data-fallback')) {
+                    target.setAttribute('data-fallback', 'true');
+                    target.src = './app-logo.png';
+                  } else {
+                    target.style.display = 'none';
+                  }
+                }}
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }} 
+              />
             </div>
             <div>
               <div style={{ fontWeight: 800, fontSize: '15px', color: '#0f172a', letterSpacing: '-0.01em' }}>imatechx</div>
@@ -652,7 +682,20 @@ export default function App() {
 
             {!sidebarOpen && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingRight: '8px', borderRight: '1px solid #e2e8f0' }}>
-                <img src={appLogo} alt="imatechx" style={{ width: '28px', height: '28px', objectFit: 'contain' }} />
+                <img 
+                  src={appLogo} 
+                  alt="imatechx" 
+                  onError={(e) => {
+                    const target = e.currentTarget;
+                    if (!target.getAttribute('data-fallback')) {
+                      target.setAttribute('data-fallback', 'true');
+                      target.src = './app-logo.png';
+                    } else {
+                      target.style.display = 'none';
+                    }
+                  }}
+                  style={{ width: '28px', height: '28px', objectFit: 'contain' }} 
+                />
                 <span style={{ fontWeight: 800, fontSize: '14px', color: '#0f172a' }}>imatechx</span>
               </div>
             )}

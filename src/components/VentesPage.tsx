@@ -399,6 +399,28 @@ export default function VentesPage({ currentLang, currentUser }: Props) {
   useEffect(() => { loadClients(); }, [loadClients]);
   useEffect(() => { barcodeInputRef.current?.focus(); }, []);
 
+  // Listen for global refresh and product updates so newly added products appear immediately
+  useEffect(() => {
+    const handleGlobalRefresh = () => {
+      loadProducts();
+      loadCategories();
+      loadClients();
+    };
+    const handleTabActivated = (e: any) => {
+      if (e?.detail === 'ventes') {
+        loadProducts();
+      }
+    };
+    window.addEventListener('app:refresh', handleGlobalRefresh);
+    window.addEventListener('products:updated', handleGlobalRefresh);
+    window.addEventListener('app:tabActivated', handleTabActivated);
+    return () => {
+      window.removeEventListener('app:refresh', handleGlobalRefresh);
+      window.removeEventListener('products:updated', handleGlobalRefresh);
+      window.removeEventListener('app:tabActivated', handleTabActivated);
+    };
+  }, [loadProducts, loadCategories, loadClients]);
+
   const toggleFavorite = async (pId: number, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
@@ -1127,7 +1149,10 @@ export default function VentesPage({ currentLang, currentUser }: Props) {
               </div>
 
               <button
-                onClick={loadProducts}
+                onClick={async () => {
+                  if (api?.flushCache) await api.flushCache();
+                  loadProducts();
+                }}
                 title={t.posRefreshItems}
                 style={{
                   background: '#f8fafc',
