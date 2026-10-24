@@ -1,0 +1,77 @@
+{
+  "name": "imatechx",
+  "productName": "imatechx",
+  "description": "imatechx - Système de Gestion Commerciale et de Distribution",
+  "author": "imatechx",
+  "private": true,
+  "version": "1.0.0",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron electron/main.cjs\"",
+    "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron electron/main.cjs\"",
+    "build": "tsc && vite build",
+    "electron": "electron electron/main.cjs",
+    "dist": "npm run build && electron-builder --win",
+    "dist:portable": "npm run build && electron-builder --win portable",
+    "dist:dir": "npm run build && electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "com.imatechx.app",
+    "productName": "imatechx",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "public/**/*"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public/app-logo.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "imatechx"
+    }
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^10.0.6",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.18.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0",
+    "wait-on": "^9.5.1"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "lucide-react": "^1.55.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  }
+}
