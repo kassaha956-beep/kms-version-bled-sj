@@ -17,9 +17,11 @@ interface SettingsPageProps {
   onSwitchUser: (user: any) => void;
   availableUsers: any[];
   onDataRestored: () => void;
-  activeSubTab?: 'language' | 'printer' | 'store' | 'account' | 'backup';
-  onSubTabChange?: (tab: 'language' | 'printer' | 'store' | 'account' | 'backup') => void;
+  activeSubTab?: 'language' | 'printer' | 'store' | 'account' | 'backup' | 'licence';
+  onSubTabChange?: (tab: 'language' | 'printer' | 'store' | 'account' | 'backup' | 'licence') => void;
   onOpenRoleModal?: (user?: any) => void;
+  activationInfo?: any;
+  onOpenActivationModal?: () => void;
 }
 
 export default function SettingsPage({
@@ -32,12 +34,14 @@ export default function SettingsPage({
   onDataRestored,
   activeSubTab,
   onSubTabChange,
-  onOpenRoleModal
+  onOpenRoleModal,
+  activationInfo,
+  onOpenActivationModal
 }: SettingsPageProps) {
   const t: Translations = translations[currentLang] || translations.fr;
 
   // Active sub-tab in Settings
-  const [subTab, setInternalSubTab] = useState<'language' | 'printer' | 'store' | 'account' | 'backup'>(activeSubTab || 'language');
+  const [subTab, setInternalSubTab] = useState<'language' | 'printer' | 'store' | 'account' | 'backup' | 'licence'>(activeSubTab || 'language');
 
   useEffect(() => {
     if (activeSubTab) {
@@ -45,7 +49,7 @@ export default function SettingsPage({
     }
   }, [activeSubTab]);
 
-  const setSubTab = (tab: 'language' | 'printer' | 'store' | 'account' | 'backup') => {
+  const setSubTab = (tab: 'language' | 'printer' | 'store' | 'account' | 'backup' | 'licence') => {
     setInternalSubTab(tab);
     if (onSubTabChange) onSubTabChange(tab);
   };
@@ -603,6 +607,30 @@ export default function SettingsPage({
         >
           <HardDrive size={16} />
           <span>{t.tabBackup}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setSubTab('licence')}
+          style={{
+            flex: '1 1 180px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '8px',
+            padding: '10px 14px',
+            borderRadius: '8px',
+            border: 'none',
+            fontSize: '13px',
+            fontWeight: 700,
+            cursor: 'pointer',
+            transition: 'all 0.15s ease',
+            background: subTab === 'licence' ? '#16a34a' : 'transparent',
+            color: subTab === 'licence' ? '#ffffff' : '#475569'
+          }}
+        >
+          <Shield size={16} />
+          <span>Licence & Activation</span>
         </button>
       </div>
 
@@ -1499,6 +1527,113 @@ export default function SettingsPage({
                 </label>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* 6. LICENCE & ACTIVATION TAB () */}
+      {/* ========================================================================= */}
+      {subTab === 'licence' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <div className="clean-card" style={{ padding: '24px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+              <div>
+              
+                <p style={{ fontSize: '13px', color: '#64748b', marginTop: '4px' }}>
+                  Gestion de votre clé de licence, état d'activation et informations de sécurité.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={onOpenActivationModal}
+                className="btn-green"
+                style={{ padding: '9px 16px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}
+              >
+                <Key size={15} />
+                <span>Modifier / Renouveler la Clé</span>
+              </button>
+            </div>
+
+            <div style={{
+              background: '#f8fafc',
+              border: '1px solid #e2e8f0',
+              borderRadius: '12px',
+              padding: '20px',
+              marginBottom: '20px'
+            }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px' }}>
+                <div>
+                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
+                    Statut de la licence
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+                    <span style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      padding: '4px 10px',
+                      borderRadius: '20px',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      background: activationInfo?.activated ? '#dcfce7' : '#fee2e2',
+                      color: activationInfo?.activated ? '#15803d' : '#b91c1c'
+                    }}>
+                      <CheckCircle2 size={13} />
+                      {activationInfo?.activated ? 'Activé & Authentifié' : 'Non Activé'}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
+                    Client Enregistré
+                  </span>
+                  <span style={{ fontSize: '14px', fontWeight: 700, color: '#0f172a', display: 'block', marginTop: '4px' }}>
+                    {activationInfo?.client || 'Client '}
+                  </span>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
+                    Logiciel Associé
+                  </span>
+                  <span style={{ fontSize: '14px', fontWeight: 600, color: '#0f172a', display: 'block', marginTop: '4px' }}>
+                    {activationInfo?.software || 'imatechx / Salle des Jeux'}
+                  </span>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
+                    Clé de Licence
+                  </span>
+                  <span style={{ fontSize: '13px', fontFamily: 'monospace', color: '#334155', display: 'block', marginTop: '4px' }}>
+                    {activationInfo?.key ? `${activationInfo.key.slice(0, 4)}••••••••${activationInfo.key.slice(-4)}` : 'Non renseignée'}
+                  </span>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
+                    Jeton de Session (Token)
+                  </span>
+                  <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#64748b', display: 'block', marginTop: '4px' }}>
+                    {activationInfo?.token || 'N/A'}
+                  </span>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
+                    Dernière Activation
+                  </span>
+                  <span style={{ fontSize: '13px', color: '#334155', display: 'block', marginTop: '4px' }}>
+                    {activationInfo?.activatedAt ? new Date(activationInfo.activatedAt).toLocaleString(currentLang === 'fr' ? 'fr-FR' : 'en-US') : 'Récemment'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+           
           </div>
         </div>
       )}

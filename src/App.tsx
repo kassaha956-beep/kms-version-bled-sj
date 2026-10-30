@@ -30,6 +30,7 @@ import DashboardPage from './components/DashboardPage';
 import ServicesPage from './components/ServicesPage';
 import UserManagementModal from './components/UserManagementModal';
 import appLogo from './assets/app-logo.png';
+import ActivationScreen from './components/ActivationScreen';
 import { hasModuleAccess, getPermissionSummary } from './permissions';
 import { translations } from './i18n';
 import type { Language, Translations } from './i18n';
@@ -149,6 +150,11 @@ declare global {
       deleteFlexyTransaction: (id: number) => Promise<{ success: boolean; message?: string }>;
       testFlexyApi: (config?: any) => Promise<{ success: boolean; message?: string; status?: number; data?: any }>;
       flushCache?: () => Promise<{ success: boolean; message?: string }>;
+
+      // Dominosoft Software Activation
+      checkActivation?: () => Promise<{ activated: boolean; key?: string; client?: string; software?: string; token?: string; activatedAt?: number }>;
+      verifyActivationKey?: (key: string) => Promise<{ success: boolean; client?: string; software?: string; token?: string; error?: string }>;
+      relaunchApp?: () => Promise<void>;
     };
   }
 }
@@ -192,6 +198,29 @@ export default function App() {
   // User & Role Management Modal
   const [showRoleModal, setShowRoleModal] = useState(false);
   const [roleModalTargetUser, setRoleModalTargetUser] = useState<any>(null);
+
+  // Dominosoft Software Activation State
+  const [activationChecked, setActivationChecked] = useState(false);
+  const [isActivated, setIsActivated] = useState(true);
+  const [activationInfo, setActivationInfo] = useState<any>(null);
+  const [showActivationModal, setShowActivationModal] = useState(false);
+
+  useEffect(() => {
+    async function checkLicensing() {
+      try {
+        if (window.electronAPI?.checkActivation) {
+          const res = await window.electronAPI.checkActivation();
+          setIsActivated(!!res.activated);
+          setActivationInfo(res);
+        }
+      } catch (err) {
+        console.error('Erreur vérification licence Dominosoft:', err);
+      } finally {
+        setActivationChecked(true);
+      }
+    }
+    checkLicensing();
+  }, []);
 
   // Load users and trigger global data refresh & cache flush
   const reloadData = async () => {
@@ -259,6 +288,30 @@ export default function App() {
     setCurrentLang(nextLang);
     localStorage.setItem('app_language', nextLang);
   };
+
+  // --- ACTIVATION CHECK SCREEN ---
+  if (!activationChecked) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#090d16', color: '#fff' }}>
+        <div style={{ textAlign: 'center' }}>
+          <RefreshCw className="animate-spin" size={32} style={{ color: '#2563eb', margin: '0 auto 16px' }} />
+          <p style={{ fontSize: '14px', color: '#94a3b8' }}>Vérification de la licence Dominosoft...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // --- ACTIVATION LOCK SCREEN (Bloque l'accès si non activé) ---
+  if (!isActivated) {
+    return (
+      <ActivationScreen 
+        onActivated={(info) => {
+          setIsActivated(true);
+          setActivationInfo(info);
+        }} 
+      />
+    );
+  }
 
   // --- LOGIN SCREEN (Clean White & Green) ---
   if (!currentUser) {
@@ -848,6 +901,8 @@ export default function App() {
                   setRoleModalTargetUser(user || null);
                   setShowRoleModal(true);
                 }}
+                activationInfo={activationInfo}
+                onOpenActivationModal={() => setShowActivationModal(true)}
               />
             </div>
           )}
@@ -873,6 +928,19 @@ export default function App() {
           }
         }}
       />
+
+      {/* MODAL: ACTIVATION / LICENCE DU LOGICIEL (DOMINOSOFT) */}
+      {showActivationModal && (
+        <ActivationScreen
+          isModal
+          onClose={() => setShowActivationModal(false)}
+          onActivated={(info) => {
+            setActivationInfo(info);
+            setIsActivated(true);
+            setShowActivationModal(false);
+          }}
+        />
+      )}
     </div>
   );
 }

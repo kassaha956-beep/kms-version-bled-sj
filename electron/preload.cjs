@@ -124,4 +124,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Global cache flush
   flushCache: () => ipcRenderer.invoke('cache:flush'),
+
+  // Dominosoft Software Activation
+  checkActivation: () => ipcRenderer.invoke('activation:checkStatus'),
+  verifyActivationKey: (key) => ipcRenderer.invoke('activation:verify', key),
+  relaunchApp: () => ipcRenderer.invoke('activation:relaunch'),
 });

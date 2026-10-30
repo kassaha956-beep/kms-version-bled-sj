@@ -3,6 +3,14 @@ const path = require('path');
 const fs = require('fs');
 const { initDatabase, reconcileStats, recalculateInventorySummary } = require('./db.cjs');
 const { appCache, TTL, cacheKey } = require('./cache.cjs');
+const { 
+  checkActivationStatus, 
+  getDemoInfo, 
+  checkProductLimit, 
+  checkVenteLimit, 
+  verifyDominosoftKey, 
+  relaunchApp 
+} = require('./activation.cjs');
 
 let mainWindow = null;
 let db = null;
@@ -80,6 +88,34 @@ app.on('window-all-closed', () => {
 
 function setupIpcHandlers() {
   ipcMain.handle('app:version', () => app.getVersion());
+
+  // Dominosoft Software Activation & Mode Démo Status
+  ipcMain.handle('activation:checkStatus', async () => {
+    const act = checkActivationStatus();
+    const demo = getDemoInfo();
+    const productCount = db ? (db.prepare('SELECT COUNT(*) as c FROM products WHERE status != "deleted"').get()?.c || 0) : 0;
+    const venteCount = db ? (db.prepare('SELECT COUNT(*) as c FROM ventes').get()?.c || 0) : 0;
+    return {
+      ...act,
+      demo: {
+        ...demo,
+        productCount,
+        venteCount
+      }
+    };
+  });
+
+  ipcMain.handle('activation:verify', async (event, key) => {
+    return await verifyDominosoftKey(key);
+  });
+
+  ipcMain.handle('verify-key', async (event, key) => {
+    return await verifyDominosoftKey(key);
+  });
+
+  ipcMain.handle('activation:relaunch', () => {
+    relaunchApp();
+  });
 
   // Auth: Login
   ipcMain.handle('auth:login', async (event, { username, password }) => {
@@ -1680,6 +1716,11 @@ function setupIpcHandlers() {
   // Create product with units and supplier comparisons
   ipcMain.handle('products:create', async (event, data) => {
     try {
+      const limitCheck = checkProductLimit(db);
+      if (!limitCheck.allowed) {
+        return { success: false, message: limitCheck.error };
+      }
+
       const {
         name,
         sku,
@@ -3801,6 +3842,11 @@ function setupIpcHandlers() {
   // Create a complete sale atomically
   ipcMain.handle('ventes:create', async (event, data) => {
     try {
+      const limitCheck = checkVenteLimit(db);
+      if (!limitCheck.allowed) {
+        return { success: false, message: limitCheck.error };
+      }
+
       const {
         items,          // [{product_id, product_name, unit_name, quantity, cost_price, selling_price, discount_percent}]
         client_id,

@@ -920,51 +920,142 @@ function initDatabase(userDataPath) {
     }
   }
 
-  // 4b. Seed default demo clients if none exist
+  // 4b. Seed 1 default client if none exist
   const countClients = db.prepare('SELECT COUNT(*) as count FROM clients').get().count;
   if (countClients === 0) {
-    console.log('[DB] Seeding default clients and sample debt records...');
-    const insertClient = db.prepare(`
+    console.log('[DB] Seeding 1 default client...');
+    db.prepare(`
       INSERT INTO clients (name, phone, address, notes, current_debt, status)
-      VALUES (?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, 0, 'active')
+    `).run('Client Comptoir', '0550 12 34 56', 'Magasin Central', 'Client habituel du comptoir');
+  }
+
+  // 4c. Seed 1 default fournisseur if none exist
+  const countFournisseurs = db.prepare('SELECT COUNT(*) as count FROM fournisseurs').get().count;
+  let defaultSupplierId = null;
+  if (countFournisseurs === 0) {
+    console.log('[DB] Seeding 1 default fournisseur...');
+    const fRes = db.prepare(`
+      INSERT INTO fournisseurs (name, contact_person, phone, email, address, city, notes, initial_credit, current_credit, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'active')
+    `).run(
+      'Grossiste Général (Tabac & Alimentation)',
+      'Mohamed',
+      '0555 12 34 56',
+      'grossiste.alger@gmail.com',
+      'Zone d\'Activité Industrielle',
+      'Alger',
+      'Fournisseur officiel tabac, boissons et confiserie'
+    );
+    defaultSupplierId = fRes.lastInsertRowid;
+  } else {
+    const fRow = db.prepare('SELECT id FROM fournisseurs ORDER BY id ASC LIMIT 1').get();
+    if (fRow) defaultSupplierId = fRow.id;
+  }
+
+  // 4d. Seed 5 initial products requested
+  const countProducts = db.prepare('SELECT COUNT(*) as count FROM products').get().count;
+  if (countProducts === 0) {
+    console.log('[DB] Seeding 5 initial products...');
+    const catTabac = db.prepare("SELECT id FROM categories WHERE name LIKE '%Tabac%'").get();
+    const catBoisson = db.prepare("SELECT id FROM categories WHERE name LIKE '%Boisson%'").get();
+    const catSnack = db.prepare("SELECT id FROM categories WHERE name LIKE '%Snack%'").get();
+
+    const insertProd = db.prepare(`
+      INSERT INTO products (
+        name, sku, barcode, category_id, primary_supplier_id, base_unit,
+        stock_quantity, min_stock_alert, cost_price, selling_price, status, is_favorite, notes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
     `);
-    
-    // Client 1 with active debt (Bloqué)
-    const c1 = insertClient.run('Karim Benali', '0550 12 34 56', 'Bab Ezzouar, Alger', 'Client habituel du quartier', 0, 'active');
-    // Client 2 without debt (À jour)
-    insertClient.run('Yacine Mansouri', '0661 23 45 67', 'Kouba, Alger', 'Règle toujours au comptant', 0, 'active');
-    // Client 3 without debt (À jour)
-    insertClient.run('Omar Saidi', '0770 98 76 54', 'Birtouta, Alger', 'Commerce de proximité', 0, 'active');
 
-    // Add a sample debt for Karim so the owner immediately sees the last taken product and blocking logic in action
-    if (c1 && c1.lastInsertRowid) {
-      const todayDate = new Date().toISOString().replace('T', ' ').substring(0, 19);
-      // Find a sample product if available, else generic name
-      const sampleProd = db.prepare("SELECT id, name, selling_price, base_unit FROM products LIMIT 1").get();
-      const prodName = sampleProd ? sampleProd.name : 'Marlboro Gold (Paquet)';
-      const prodId = sampleProd ? sampleProd.id : null;
-      const unitPrice = sampleProd ? (sampleProd.selling_price || 700) : 700;
-      const qty = 2;
-      const totalAmt = unitPrice * qty;
+    const insertUnit = db.prepare(`
+      INSERT INTO product_units (product_id, unit_name, conversion_factor, selling_price, cost_price, is_default)
+      VALUES (?, ?, 1, ?, ?, 1)
+    `);
 
-      db.prepare(`
-        INSERT INTO client_debts (
-          client_id, product_id, product_name, unit_name, quantity, conversion_factor,
-          unit_price, total_amount, paid_amount, remaining_amount, date, notes, status
-        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?, ?, 'unpaid')
-      `).run(
-        c1.lastInsertRowid,
-        prodId,
-        prodName,
-        sampleProd?.base_unit || 'Paquet',
-        qty,
-        unitPrice,
-        totalAmt,
-        totalAmt,
-        todayDate,
-        'Dette initiale enregistrée au comptoir'
+    const insertSuppPrice = db.prepare(`
+      INSERT INTO product_suppliers (product_id, supplier_id, purchase_price, is_primary)
+      VALUES (?, ?, ?, 1)
+    `);
+
+    const initialProducts = [
+      {
+        name: 'Marlboro Rouge',
+        sku: 'MALB-ROUGE-30',
+        barcode: '762210080001',
+        catId: catTabac ? catTabac.id : null,
+        base_unit: 'Paquet',
+        stock: 500, // 500 packet
+        cost_price: 25,
+        selling_price: 30, // 30da cigarette
+        is_favorite: 1,
+        notes: 'Marlboro Rouge cigarette 30 DA (500 paquets)'
+      },
+      {
+        name: 'Coca Cola sghira',
+        sku: 'COCA-SGHIRA-60',
+        barcode: '544900000099',
+        catId: catBoisson ? catBoisson.id : null,
+        base_unit: 'Bouteille',
+        stock: 100,
+        cost_price: 45,
+        selling_price: 60, // 60da vente
+        is_favorite: 1,
+        notes: 'Coca Cola sghira 60 DA vente'
+      },
+      {
+        name: 'Chips Rifkus',
+        sku: 'CHIPS-RIFKUS-60',
+        barcode: '613000001234',
+        catId: catSnack ? catSnack.id : null,
+        base_unit: 'Sachet',
+        stock: 100,
+        cost_price: 45,
+        selling_price: 60, // 60da vente
+        is_favorite: 1,
+        notes: 'Chips Rifkus 60 DA vente'
+      },
+      {
+        name: 'Saida (S3ida)',
+        sku: 'EAU-SAIDA-50',
+        barcode: '613000005432',
+        catId: catBoisson ? catBoisson.id : null,
+        base_unit: 'Bouteille',
+        stock: 100,
+        cost_price: 35,
+        selling_price: 50, // s3ida 50da
+        is_favorite: 1,
+        notes: 'Eau minérale Saida 50 DA'
+      },
+      {
+        name: 'Zari3a sghira',
+        sku: 'SNK-ZARI3A-10',
+        barcode: '613000009876',
+        catId: catSnack ? catSnack.id : null,
+        base_unit: 'Sachet',
+        stock: 200,
+        cost_price: 5,
+        selling_price: 10, // zari3a sghira 10de vente
+        is_favorite: 1,
+        notes: 'Zari3a sghira 10 DA vente'
+      }
+    ];
+
+    for (const p of initialProducts) {
+      const pRes = insertProd.run(
+        p.name, p.sku, p.barcode, p.catId, defaultSupplierId, p.base_unit,
+        p.stock, 10, p.cost_price, p.selling_price, p.is_favorite, p.notes
       );
+      const prodId = pRes.lastInsertRowid;
+      insertUnit.run(prodId, p.base_unit, p.selling_price, p.cost_price);
+      if (defaultSupplierId) {
+        insertSuppPrice.run(prodId, defaultSupplierId, p.cost_price);
+      }
     }
+
+    try {
+      recalculateInventorySummary(db);
+    } catch (e) {}
   }
 
   // 5. Seed initial "Caisse Principale" (is_default = 1, protected from deletion)
