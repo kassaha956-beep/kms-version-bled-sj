@@ -16,9 +16,17 @@ interface ActivationScreenProps {
   onActivated?: (info: any) => void;
   isModal?: boolean;
   onClose?: () => void;
+  isExpiredDemo?: boolean;
+  demoDaysTotal?: number;
 }
 
-export default function ActivationScreen({ onActivated, isModal = false, onClose }: ActivationScreenProps) {
+export default function ActivationScreen({
+  onActivated,
+  isModal = false,
+  onClose,
+  isExpiredDemo = false,
+  demoDaysTotal = 3
+}: ActivationScreenProps) {
   const [licenseKey, setLicenseKey] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -196,12 +204,14 @@ export default function ActivationScreen({ onActivated, isModal = false, onClose
           marginBottom: '6px',
           letterSpacing: '-0.02em'
         }}>
-          {successInfo ? 'Licence Activée avec Succès' : 'Activation du Logiciel'}
+          {successInfo ? 'Licence Activée avec Succès' : isExpiredDemo ? 'Période d\'Essai de 3 Jours Expirée' : 'Activation du Logiciel'}
         </h1>
         <p style={{ fontSize: '13px', color: '#64748b', margin: 0 }}>
           {successInfo 
             ? 'Votre copie du logiciel est validée et prête à l\'utilisation.'
-            : 'Saisissez votre clé de licence pour activer et sécuriser votre application.'}
+            : isExpiredDemo
+              ? 'Votre période d\'essai de 3 jours est terminée. Veuillez saisir votre clé d\'activation officielle pour continuer.'
+              : 'Saisissez votre clé de licence pour activer et sécuriser votre application.'}
         </p>
       </div>
 
@@ -297,6 +307,26 @@ export default function ActivationScreen({ onActivated, isModal = false, onClose
       ) : (
         /* Form State */
         <form onSubmit={handleActivate}>
+          {isExpiredDemo && !error && (
+            <div style={{
+              background: '#fffbeb',
+              border: '1px solid #fde68a',
+              color: '#92400e',
+              padding: '12px 14px',
+              borderRadius: '10px',
+              fontSize: '13px',
+              marginBottom: '20px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}>
+              <AlertTriangle size={18} style={{ flexShrink: 0, color: '#d97706' }} />
+              <div>
+                <strong style={{ display: 'block', marginBottom: '2px' }}>Période d'Essai Expirée :</strong>
+                <span>Les {demoDaysTotal} jours d'essai gratuit sont écoulés. L'activation par clé officielle est désormais obligatoire pour continuer.</span>
+              </div>
+            </div>
+          )}
           {error && (
             <div style={{
               background: '#fef2f2',

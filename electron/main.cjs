@@ -91,18 +91,45 @@ function setupIpcHandlers() {
 
   // Dominosoft Software Activation & Mode Démo Status
   ipcMain.handle('activation:checkStatus', async () => {
-    const act = checkActivationStatus();
-    const demo = getDemoInfo();
-    const productCount = db ? (db.prepare('SELECT COUNT(*) as c FROM products WHERE status != "deleted"').get()?.c || 0) : 0;
-    const venteCount = db ? (db.prepare('SELECT COUNT(*) as c FROM ventes').get()?.c || 0) : 0;
-    return {
-      ...act,
-      demo: {
-        ...demo,
-        productCount,
-        venteCount
+    try {
+      const act = checkActivationStatus();
+      const demo = getDemoInfo();
+      let productCount = 0;
+      let venteCount = 0;
+      try {
+        productCount = db ? (db.prepare("SELECT COUNT(*) as c FROM products WHERE status != 'deleted'").get()?.c || 0) : 0;
+      } catch (e) {
+        console.error('[Activation] Error counting products:', e);
       }
-    };
+      try {
+        venteCount = db ? (db.prepare('SELECT COUNT(*) as c FROM ventes').get()?.c || 0) : 0;
+      } catch (e) {
+        console.error('[Activation] Error counting ventes:', e);
+      }
+      return {
+        ...act,
+        demo: {
+          ...demo,
+          productCount,
+          venteCount
+        }
+      };
+    } catch (err) {
+      console.error('[Activation] Error in checkStatus:', err);
+      return {
+        activated: false,
+        demo: {
+          isActivated: false,
+          isDemo: true,
+          expired: false,
+          durationDays: 3,
+          daysLeft: 3,
+          hoursLeft: 72,
+          productCount: 0,
+          venteCount: 0
+        }
+      };
+    }
   });
 
   ipcMain.handle('activation:verify', async (event, key) => {
@@ -120,6 +147,16 @@ function setupIpcHandlers() {
   // Auth: Login
   ipcMain.handle('auth:login', async (event, { username, password }) => {
     try {
+      const act = checkActivationStatus();
+      if (!act.activated) {
+        const demo = getDemoInfo();
+        if (demo.expired) {
+          return {
+            success: false,
+            message: 'La période d\'essai de 3 jours est terminée. L\'activation obligatoire du logiciel est requise pour continuer.'
+          };
+        }
+      }
       const user = db.prepare('SELECT id, username, full_name, role, permissions, phone, department, position FROM users WHERE username = ? AND password = ?').get(username, password);
       if (user) {
         let permissions = [];
@@ -135,7 +172,7 @@ function setupIpcHandlers() {
         db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(user.username, 'Connexion réussie');
         return { success: true, user };
       }
-      return { success: false, message: 'Identifiants invalides (Défaut: admin / admin)' };
+      return { success: false, message: 'Identifiant ou mot de passe incorrect' };
     } catch (err) {
       console.error('Login error:', err);
       return { success: false, message: err.message };

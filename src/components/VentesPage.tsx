@@ -68,6 +68,7 @@ interface Client {
 interface Props {
   currentLang: Language | string;
   currentUser: any;
+  isActive?: boolean;
 }
 
 const api = (window as any).electronAPI;
@@ -183,7 +184,7 @@ export const formatCigaretteStock = (totalUnits: number, packFactor: number = 20
   return `${loose} ${lN}`;
 };
 
-export default function VentesPage({ currentLang, currentUser }: Props) {
+export default function VentesPage({ currentLang, currentUser, isActive = true }: Props) {
   const t: Translations = translations[currentLang as Language] || translations.fr;
   const isRtl = currentLang === 'ar';
   const canSellCredit = hasPermission(currentUser, 'ventes.credit');
@@ -218,6 +219,10 @@ export default function VentesPage({ currentLang, currentUser }: Props) {
   const [selectedCatId, setSelectedCatId] = useState<number|'all'>('all');
   const [barcodeScanVal, setBarcodeScanVal] = useState('');
   const barcodeInputRef = useRef<HTMLInputElement>(null);
+  // Global Barcode Scanner Detector (intercepts scans even when barcode input is not selected)
+  const barcodeBufferRef = useRef<string>('');
+  const barcodeKeyTimesRef = useRef<number[]>([]);
+  const barcodeClearTimerRef = useRef<any>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const lastQtyInputRef = useRef<HTMLInputElement>(null);
   const [editingQty, setEditingQty] = useState<{ [key: string]: string }>({});
@@ -397,7 +402,11 @@ export default function VentesPage({ currentLang, currentUser }: Props) {
   useEffect(() => { loadProducts(); }, [loadProducts]);
   useEffect(() => { loadCategories(); }, [loadCategories]);
   useEffect(() => { loadClients(); }, [loadClients]);
-  useEffect(() => { barcodeInputRef.current?.focus(); }, []);
+  useEffect(() => {
+    if (isActive) {
+      barcodeInputRef.current?.focus();
+    }
+  }, [isActive]);
 
   // Listen for global refresh and product updates so newly added products appear immediately
   useEffect(() => {
@@ -514,38 +523,54 @@ export default function VentesPage({ currentLang, currentUser }: Props) {
     });
   };
 
-  const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    const val = barcodeScanVal.trim();
-    if (!val) return;
-    let mp: Product|undefined, mu: string|undefined;
+  const processBarcode = (code: string) => {
+    const val = (code || '').trim();
+    if (!val) return false;
+    let mp: Product | undefined, mu: string | undefined;
+
+    const matchVal = (b?: string) => {
+      if (!b) return false;
+      const cleanB = b.trim();
+      if (cleanB.toLowerCase() === val.toLowerCase()) return true;
+      if (val.length === 13 && val.startsWith('0') && cleanB.toLowerCase() === val.slice(1).toLowerCase()) return true;
+      if (cleanB.length === 13 && cleanB.startsWith('0') && cleanB.slice(1).toLowerCase() === val.toLowerCase()) return true;
+      return false;
+    };
+
     for (const p of products) {
       if (p.units) {
-        const u = p.units.find(u => u.barcode && u.barcode.trim() === val);
+        const u = p.units.find(u => matchVal(u.barcode));
         if (u) { mp = p; mu = u.unit_name; break; }
       }
     }
     if (!mp) {
-      mp = products.find(p => (p.barcode && p.barcode.trim() === val) || (p.sku && p.sku.trim().toLowerCase() === val.toLowerCase()));
+      mp = products.find(p => matchVal(p.barcode) || (p.sku && p.sku.trim().toLowerCase() === val.toLowerCase()));
     }
     if (mp) {
       if (isCigaretteProduct(mp)) {
         if (lastSelectedItem && lastSelectedItem.product.id === mp.id) {
-          // If the last scanned product was this same cigarette, keep its active mode (Tige or Paquet)
           mu = lastSelectedItem.unitName;
         } else {
-          // First scan or different product previously: start fresh with Paquet
           const pu = mp.units?.find(u => (u.conversion_factor || 1) > 1);
           mu = pu ? pu.unit_name : mu;
         }
       }
       addToCartWithUnit(mp, mu);
       showToast(`+ ${mp.name} (${mu || mp.base_unit || 'Pqt'})`, 'success');
+      return true;
     } else {
       sound.error();
       showToast(`Code-barres inconnu: "${val}"`, 'error');
+      return false;
     }
+  };
+
+  const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const val = barcodeScanVal.trim();
+    if (!val) return;
+    processBarcode(val);
     setTimeout(() => {
       setBarcodeScanVal('');
       barcodeInputRef.current?.select();
@@ -771,8 +796,67 @@ export default function VentesPage({ currentLang, currentUser }: Props) {
 
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (!isActive) return;
+
+      const target = e.target as HTMLElement;
+      const tag = target?.tagName?.toLowerCase();
       const isInput = tag === 'input' || tag === 'textarea' || tag === 'select';
+      const isBarcodeInput = target === barcodeInputRef.current;
+
+      // --- DÉTECTION AUTOMATIQUE DE CODE-BARRES PHYSIQUE ---
+      // Fonctionne même quand le champ de scan n'est PAS sélectionné !
+      if (e.key === 'Enter') {
+        const bufferedCode = barcodeBufferRef.current.trim();
+        const keyTimes = barcodeKeyTimesRef.current;
+
+        barcodeBufferRef.current = '';
+        barcodeKeyTimesRef.current = [];
+        if (barcodeClearTimerRef.current) clearTimeout(barcodeClearTimerRef.current);
+
+        const isRapidScan = keyTimes.length >= 3 &&
+          ((keyTimes[keyTimes.length - 1] - keyTimes[0]) / (keyTimes.length - 1)) < 65;
+
+        if (!isBarcodeInput && bufferedCode.length >= 2 && (!isInput || isRapidScan)) {
+          e.preventDefault();
+          e.stopPropagation();
+
+          if (target === searchInputRef.current) {
+            setProdSearch('');
+          }
+
+          processBarcode(bufferedCode);
+
+          setTimeout(() => {
+            setBarcodeScanVal('');
+            barcodeInputRef.current?.focus();
+            barcodeInputRef.current?.select();
+          }, 40);
+          return;
+        }
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        const now = Date.now();
+        const lastTime = barcodeKeyTimesRef.current[barcodeKeyTimesRef.current.length - 1] || 0;
+
+        if (now - lastTime > 350) {
+          barcodeBufferRef.current = '';
+          barcodeKeyTimesRef.current = [];
+        }
+
+        barcodeBufferRef.current += e.key;
+        barcodeKeyTimesRef.current.push(now);
+
+        if (barcodeClearTimerRef.current) clearTimeout(barcodeClearTimerRef.current);
+        barcodeClearTimerRef.current = setTimeout(() => {
+          barcodeBufferRef.current = '';
+          barcodeKeyTimesRef.current = [];
+        }, 400);
+
+        if (!isInput) {
+          setBarcodeScanVal(barcodeBufferRef.current);
+          barcodeInputRef.current?.focus();
+        }
+      }
+
       if (e.key === 'F2' || (e.key === '/' && !isInput)) {
         e.preventDefault();
         searchInputRef.current?.focus();
@@ -861,12 +945,23 @@ export default function VentesPage({ currentLang, currentUser }: Props) {
     };
     window.addEventListener('keydown', kd);
     return () => window.removeEventListener('keydown', kd);
-  }, [cart, heldCarts, heldCartCounter, selectedClient, showAdvancedCheckout, showReceiptModal, showCreditModal, prodSearch, totalAmount, lastSelectedItem]);
+  }, [cart, heldCarts, heldCartCounter, selectedClient, showAdvancedCheckout, showReceiptModal, showCreditModal, prodSearch, totalAmount, lastSelectedItem, isActive]);
 
   const lastIsCig = lastSelectedItem && isCigaretteProduct(lastSelectedItem.product);
 
+  const handlePageClick = (e: React.MouseEvent) => {
+    const el = e.target as HTMLElement;
+    if (!el) return;
+    const isInteractive = el.closest('button, input, textarea, select, [role="button"], a');
+    if (!isInteractive && !showAdvancedCheckout && !showCreditModal && !showReceiptModal) {
+      barcodeInputRef.current?.focus();
+    }
+  };
+
   return (
-    <div style={{
+    <div 
+      onClick={handlePageClick}
+      style={{
       display: 'flex',
       flexDirection: 'column',
       height: 'calc(100vh - 65px)',

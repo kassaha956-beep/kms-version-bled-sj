@@ -37,6 +37,17 @@ function getDemoFilePath() {
 }
 
 /**
+ * Retourne un chemin de sauvegarde secondaire pour éviter la réinitialisation frauduleuse
+ */
+function getSecondaryDemoFilePath() {
+  try {
+    return path.join(app.getPath('userData'), '.elc_demo.dat');
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
  * Vérifie si le logiciel est activé avec une clé officielle Dominosoft
  */
 function checkActivationStatus() {
@@ -66,7 +77,7 @@ function checkActivationStatus() {
 }
 
 /**
- * Récupère ou initialise l'état du mode Démo (3 jours, max 15 produits, max 30 ventes)
+ * Récupère ou initialise l'état du mode Démo (3 jours à compter du premier lancement)
  */
 function getDemoInfo() {
   const activation = checkActivationStatus();
@@ -83,6 +94,7 @@ function getDemoInfo() {
   }
 
   const demoPath = getDemoFilePath();
+  const secondaryPath = getSecondaryDemoFilePath();
   const dir = path.dirname(demoPath);
   if (!fs.existsSync(dir)) {
     try {
@@ -97,21 +109,63 @@ function getDemoInfo() {
     } catch (e) {}
   }
 
+  // Vérifier également la sauvegarde secondaire
+  let secondaryData = null;
+  if (secondaryPath && fs.existsSync(secondaryPath)) {
+    try {
+      secondaryData = JSON.parse(fs.readFileSync(secondaryPath, 'utf8'));
+    } catch (e) {}
+  }
+
   const now = Date.now();
-  if (!demoData || !demoData.startedAt) {
+
+  // Prendre la date de premier lancement la plus ancienne pour empêcher la réinitialisation
+  let earliestStart = null;
+  let lastRecordedRun = null;
+  if (demoData && demoData.startedAt) {
+    earliestStart = demoData.startedAt;
+    if (demoData.lastRunAt) lastRecordedRun = demoData.lastRunAt;
+  }
+  if (secondaryData && secondaryData.startedAt) {
+    if (!earliestStart || secondaryData.startedAt < earliestStart) {
+      earliestStart = secondaryData.startedAt;
+    }
+    if (secondaryData.lastRunAt && (!lastRecordedRun || secondaryData.lastRunAt > lastRecordedRun)) {
+      lastRecordedRun = secondaryData.lastRunAt;
+    }
+  }
+
+  if (!earliestStart) {
+    earliestStart = now;
     demoData = {
-      startedAt: now,
-      expiresAt: now + DEMO_DURATION_MS,
+      startedAt: earliestStart,
+      expiresAt: earliestStart + DEMO_DURATION_MS,
       durationDays: DEMO_DURATION_DAYS,
-      maxProducts: MAX_DEMO_PRODUCTS,
-      maxVentes: MAX_DEMO_VENTES
+      lastRunAt: now
     };
     try {
       fs.writeFileSync(demoPath, JSON.stringify(demoData, null, 2), 'utf8');
+      if (secondaryPath) {
+        fs.writeFileSync(secondaryPath, JSON.stringify(demoData, null, 2), 'utf8');
+      }
       console.log('[Mode Démo] ✅ Initialisation de la période d\'essai de 3 jours:', demoData);
     } catch (e) {
       console.error('[Mode Démo] Erreur création demo.flag:', e);
     }
+  } else {
+    demoData = {
+      startedAt: earliestStart,
+      expiresAt: earliestStart + DEMO_DURATION_MS,
+      durationDays: DEMO_DURATION_DAYS,
+      lastRunAt: Math.max(now, lastRecordedRun || now)
+    };
+    // Mettre à jour les deux fichiers
+    try {
+      fs.writeFileSync(demoPath, JSON.stringify(demoData, null, 2), 'utf8');
+      if (secondaryPath) {
+        fs.writeFileSync(secondaryPath, JSON.stringify(demoData, null, 2), 'utf8');
+      }
+    } catch (e) {}
   }
 
   // Protection contre le recul d'horloge du système (> 2 minutes de recul)
@@ -119,10 +173,13 @@ function getDemoInfo() {
   if (now < demoData.startedAt - 120000) {
     isExpired = true;
   }
+  if (lastRecordedRun && now < lastRecordedRun - 120000) {
+    isExpired = true;
+  }
 
   const timeLeftMs = Math.max(0, demoData.expiresAt - now);
-  const daysLeft = Math.ceil(timeLeftMs / (24 * 60 * 60 * 1000));
-  const hoursLeft = Math.ceil(timeLeftMs / (60 * 60 * 1000));
+  const daysLeft = Math.max(0, Math.ceil(timeLeftMs / (24 * 60 * 60 * 1000)));
+  const hoursLeft = Math.max(0, Math.ceil(timeLeftMs / (60 * 60 * 1000)));
 
   return {
     isActivated: false,
@@ -134,8 +191,8 @@ function getDemoInfo() {
     timeLeftMs,
     daysLeft,
     hoursLeft,
-    maxProducts: MAX_DEMO_PRODUCTS,
-    maxVentes: MAX_DEMO_VENTES
+    maxProducts: Infinity,
+    maxVentes: Infinity
   };
 }
 
@@ -156,20 +213,6 @@ function checkProductLimit(db) {
     };
   }
 
-  try {
-    if (db) {
-      const count = db.prepare('SELECT COUNT(*) as c FROM products WHERE status != "deleted"').get().c;
-      if (count >= demo.maxProducts) {
-        return {
-          allowed: false,
-          error: `Limite du mode démo atteinte : vous ne pouvez pas créer plus de ${demo.maxProducts} produits. Veuillez activer la licence complète Dominosoft.`
-        };
-      }
-    }
-  } catch (err) {
-    console.error('Erreur vérification limite produits:', err);
-  }
-
   return { allowed: true };
 }
 
@@ -188,20 +231,6 @@ function checkVenteLimit(db) {
       allowed: false,
       error: 'La période d\'essai de 3 jours est terminée. L\'activation obligatoire du logiciel est requise pour enregistrer des ventes.'
     };
-  }
-
-  try {
-    if (db) {
-      const count = db.prepare('SELECT COUNT(*) as c FROM ventes').get().c;
-      if (count >= demo.maxVentes) {
-        return {
-          allowed: false,
-          error: `Limite du mode démo atteinte : vous ne pouvez pas enregistrer plus de ${demo.maxVentes} ventes. Veuillez activer la licence complète Dominosoft.`
-        };
-      }
-    }
-  } catch (err) {
-    console.error('Erreur vérification limite ventes:', err);
   }
 
   return { allowed: true };

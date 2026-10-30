@@ -1586,50 +1586,12 @@ export default function SettingsPage({
                   </div>
                 </div>
 
-                <div>
-                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
-                    Client Enregistré
-                  </span>
-                  <span style={{ fontSize: '14px', fontWeight: 700, color: '#0f172a', display: 'block', marginTop: '4px' }}>
-                    {activationInfo?.client || 'Client '}
-                  </span>
-                </div>
+               
 
-                <div>
-                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
-                    Logiciel Associé
-                  </span>
-                  <span style={{ fontSize: '14px', fontWeight: 600, color: '#0f172a', display: 'block', marginTop: '4px' }}>
-                    {activationInfo?.software || 'imatechx / Salle des Jeux'}
-                  </span>
-                </div>
+               
 
-                <div>
-                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
-                    Clé de Licence
-                  </span>
-                  <span style={{ fontSize: '13px', fontFamily: 'monospace', color: '#334155', display: 'block', marginTop: '4px' }}>
-                    {activationInfo?.key ? `${activationInfo.key.slice(0, 4)}••••••••${activationInfo.key.slice(-4)}` : 'Non renseignée'}
-                  </span>
-                </div>
-
-                <div>
-                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
-                    Jeton de Session (Token)
-                  </span>
-                  <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#64748b', display: 'block', marginTop: '4px' }}>
-                    {activationInfo?.token || 'N/A'}
-                  </span>
-                </div>
-
-                <div>
-                  <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', textTransform: 'uppercase' }}>
-                    Dernière Activation
-                  </span>
-                  <span style={{ fontSize: '13px', color: '#334155', display: 'block', marginTop: '4px' }}>
-                    {activationInfo?.activatedAt ? new Date(activationInfo.activatedAt).toLocaleString(currentLang === 'fr' ? 'fr-FR' : 'en-US') : 'Récemment'}
-                  </span>
-                </div>
+                
+               
               </div>
             </div>
 

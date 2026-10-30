@@ -152,7 +152,7 @@ declare global {
       flushCache?: () => Promise<{ success: boolean; message?: string }>;
 
       // Dominosoft Software Activation
-      checkActivation?: () => Promise<{ activated: boolean; key?: string; client?: string; software?: string; token?: string; activatedAt?: number }>;
+      checkActivation?: () => Promise<{ activated: boolean; key?: string; client?: string; software?: string; token?: string; activatedAt?: number; demo?: any }>;
       verifyActivationKey?: (key: string) => Promise<{ success: boolean; client?: string; software?: string; token?: string; error?: string }>;
       relaunchApp?: () => Promise<void>;
     };
@@ -184,8 +184,8 @@ export default function App() {
   const t: Translations = translations[currentLang] || translations.fr;
 
   // Login form
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -199,9 +199,11 @@ export default function App() {
   const [showRoleModal, setShowRoleModal] = useState(false);
   const [roleModalTargetUser, setRoleModalTargetUser] = useState<any>(null);
 
-  // Dominosoft Software Activation State
+  // Dominosoft Software Activation & Mode Démo (3 jours)
   const [activationChecked, setActivationChecked] = useState(false);
-  const [isActivated, setIsActivated] = useState(true);
+  const [isActivated, setIsActivated] = useState(false);
+  const [isDemoActive, setIsDemoActive] = useState(false);
+  const [demoInfo, setDemoInfo] = useState<any>(null);
   const [activationInfo, setActivationInfo] = useState<any>(null);
   const [showActivationModal, setShowActivationModal] = useState(false);
 
@@ -210,17 +212,56 @@ export default function App() {
       try {
         if (window.electronAPI?.checkActivation) {
           const res = await window.electronAPI.checkActivation();
-          setIsActivated(!!res.activated);
           setActivationInfo(res);
+          if (res.activated) {
+            setIsActivated(true);
+            setIsDemoActive(false);
+            setDemoInfo(null);
+          } else {
+            setIsActivated(false);
+            const demo = res.demo;
+            setDemoInfo(demo || null);
+            if (demo && !demo.expired) {
+              setIsDemoActive(true);
+            } else {
+              setIsDemoActive(false);
+            }
+          }
+        } else {
+          setIsActivated(true);
         }
       } catch (err) {
         console.error('Erreur vérification licence Dominosoft:', err);
+        setIsDemoActive(true);
       } finally {
         setActivationChecked(true);
       }
     }
     checkLicensing();
   }, []);
+
+  // Vérification périodique du mode démo pour verrouiller si les 3 jours expirent en cours d'utilisation
+  useEffect(() => {
+    if (isActivated) return;
+    const interval = setInterval(async () => {
+      try {
+        if (window.electronAPI?.checkActivation) {
+          const res = await window.electronAPI.checkActivation();
+          if (res.activated) {
+            setIsActivated(true);
+            setIsDemoActive(false);
+            setActivationInfo(res);
+          } else if (res.demo) {
+            setDemoInfo(res.demo);
+            if (res.demo.expired) {
+              setIsDemoActive(false);
+            }
+          }
+        }
+      } catch (e) {}
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [isActivated]);
 
   // Load users and trigger global data refresh & cache flush
   const reloadData = async () => {
@@ -273,7 +314,7 @@ export default function App() {
         } else if (username === 'manager' && password === 'manager') {
           setCurrentUser({ id: 2, username: 'manager', full_name: 'Logistics Manager', role: 'manager', permissions: ['*'] });
         } else {
-          setLoginError('Identifiant ou mot de passe incorrect (admin / admin)');
+          setLoginError('Identifiant ou mot de passe incorrect');
         }
       }
     } catch (err: any) {
@@ -301,13 +342,18 @@ export default function App() {
     );
   }
 
-  // --- ACTIVATION LOCK SCREEN (Bloque l'accès si non activé) ---
-  if (!isActivated) {
+  const isAccessAllowed = isActivated || (isDemoActive && !demoInfo?.expired);
+
+  // --- ACTIVATION LOCK SCREEN (Bloque l'accès si non activé ET période démo de 3 jours expirée) ---
+  if (!isAccessAllowed) {
     return (
       <ActivationScreen 
+        isExpiredDemo={demoInfo?.expired}
+        demoDaysTotal={demoInfo?.durationDays || 3}
         onActivated={(info) => {
           setIsActivated(true);
-          setActivationInfo(info);
+          setIsDemoActive(false);
+          setActivationInfo({ ...info, activated: true });
         }} 
       />
     );
@@ -777,6 +823,31 @@ export default function App() {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {/* Mode Démo Badge si en période d'essai de 3 jours */}
+            {isDemoActive && !isActivated && demoInfo && (
+              <button
+                type="button"
+                onClick={() => setShowActivationModal(true)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '5px 12px',
+                  borderRadius: '20px',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  background: '#fef3c7',
+                  color: '#b45309',
+                  border: '1px solid #fde68a',
+                  cursor: 'pointer'
+                }}
+                title="Cliquez pour activer la version complète"
+              >
+                <Clock size={13} />
+                <span>Mode Démo : {demoInfo.daysLeft > 1 ? `${demoInfo.daysLeft} jours restants` : `${demoInfo.hoursLeft}h restantes`}</span>
+                <span style={{ textDecoration: 'underline', color: '#15803d', fontWeight: 800 }}>Activer</span>
+              </button>
+            )}
             {/* Quick language toggle */}
             <button 
               type="button"
@@ -839,6 +910,7 @@ export default function App() {
               <VentesPage
                 currentLang={currentLang}
                 currentUser={currentUser}
+                isActive={activeTab === 'ventes'}
               />
             </div>
           )}
