@@ -11,8 +11,10 @@
     "dev": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron electron/main.cjs\"",
     "build": "tsc && vite build",
     "electron": "electron electron/main.cjs",
-    "dist": "npm run build && electron-builder --win",
-    "dist:dir": "npm run build && electron-builder --win --dir"
+    "dist": "npm run build && electron scripts/protect-build.cjs && electron-builder --win",
+    "dist:dir": "npm run build && electron scripts/protect-build.cjs && electron-builder --win --dir",
+    "protect": "electron scripts/protect-build.cjs",
+    "clean:bytecode": "node scripts/clean-bytecode.cjs"
   },
   "build": {
     "appId": "com.imatechx.app",
@@ -24,6 +26,7 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "!electron/**/*.src.cjs",
       "package.json",
       "public/**/*"
     ],
@@ -63,8 +66,11 @@
     "wait-on": "^9.5.1"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "better-sqlite3": "^13.0.3",
+    "bytenode": "^2.1.0",
     "lucide-react": "^1.55.0",
+    "pdf-parse": "^2.4.5",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   }

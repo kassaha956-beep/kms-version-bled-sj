@@ -1406,7 +1406,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
             overflowY: 'auto',
             padding: '8px 10px',
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
             gap: '6px',
             alignContent: 'start',
             background: '#f8fafc'

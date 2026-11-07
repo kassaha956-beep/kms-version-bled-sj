@@ -89,11 +89,15 @@ declare global {
       getSupplierComparison: (id: number) => Promise<{ success: boolean; comparison?: any[]; minPrice?: number; message?: string }>;
       getCategories: () => Promise<{ success: boolean; categories?: any[]; message?: string }>;
       createCategory: (data: any) => Promise<{ success: boolean; id?: number; message?: string }>;
+      updateCategory: (data: any) => Promise<{ success: boolean; message?: string }>;
+      deleteCategory: (id: number) => Promise<{ success: boolean; message?: string }>;
       createCartOrder: (data: any) => Promise<{ success: boolean; orderId?: number; totalAmount?: number; itemCount?: number; message?: string }>;
       getCartOrders: (filters?: any) => Promise<{ success: boolean; orders?: any[]; totalCount?: number; totalPages?: number; currentPage?: number; totalAmountSum?: number; message?: string }>;
       getCartOrderById: (id: number) => Promise<{ success: boolean; order?: any; items?: any[]; message?: string }>;
       deleteCartOrder: (id: number) => Promise<{ success: boolean; message?: string }>;
       updateCartOrder: (data: any) => Promise<{ success: boolean; message?: string }>;
+      selectAndParseInvoicePdf: () => Promise<{ success: boolean; canceled?: boolean; fileName?: string; filePath?: string; rawText?: string; items?: any[]; message?: string }>;
+      parseInvoicePdfBuffer: (base64: string) => Promise<{ success: boolean; rawText?: string; items?: any[]; message?: string }>;
 
       // Employees & Payroll
       getEmployees: (filters?: any) => Promise<{ success: boolean; employees?: any[]; totalCount?: number; totalPages?: number; page?: number; message?: string }>;

@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import {
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { Settings, 
   Package, Plus, Search, Edit2, Trash2, ShoppingCart, 
   CheckCircle2, AlertTriangle, 
   X, RefreshCw, Building2, Tag,
   Scale, BarChart2, History, FileText, Eye, Star
 } from 'lucide-react';
+import { findMatchingProducts } from '../utils/invoiceMatcher';
 import type { Language, Translations } from '../i18n';
 import { translations } from '../i18n';
 import { formatCigaretteStock } from './VentesPage';
@@ -216,6 +217,17 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
   // Products & Categories state
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  // Category Management State
+  const [isManageCategoriesOpen, setIsManageCategoriesOpen] = useState<boolean>(false);
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [categoryForm, setCategoryForm] = useState<{ name: string; code: string; color: string }>({
+    name: '',
+    code: '',
+    color: '#16a34a'
+  });
+  const [categorySearch, setCategorySearch] = useState<string>('');
+  const [categoryError, setCategoryError] = useState<string>('');
+  const [categorySuccess, setCategorySuccess] = useState<string>('');
   const [suppliers, setSuppliers] = useState<any[]>([]);
   const [caisses, setCaisses] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -349,6 +361,106 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
   const [cigUnitSellPrice, setCigUnitSellPrice] = useState<number>(20);
   const [cigMinStockPacks, setCigMinStockPacks] = useState<number>(2);
 
+  // Category management handlers
+  const loadCategories = useCallback(async () => {
+    if (window.electronAPI?.getCategories) {
+      try {
+        const catRes = await window.electronAPI.getCategories();
+        if (catRes.success && Array.isArray(catRes.categories)) {
+          setCategories(catRes.categories);
+        }
+      } catch (err) {
+        console.error('Failed to load categories:', err);
+      }
+    }
+  }, []);
+
+  const handleSaveCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCategoryError('');
+    setCategorySuccess('');
+
+    if (!categoryForm.name.trim()) {
+      setCategoryError('Le nom de la catégorie est obligatoire.');
+      return;
+    }
+
+    try {
+      if (editingCategory) {
+        if (window.electronAPI?.updateCategory) {
+          const res = await window.electronAPI.updateCategory({
+            id: editingCategory.id,
+            name: categoryForm.name.trim(),
+            code: categoryForm.code.trim() || undefined,
+            color: categoryForm.color
+          });
+          if (!res.success) {
+            setCategoryError(res.message || 'Erreur lors de la modification');
+            return;
+          }
+        } else {
+          setCategories(prev => prev.map(c => c.id === editingCategory.id ? { ...c, name: categoryForm.name.trim(), code: categoryForm.code.trim(), color: categoryForm.color } : c));
+        }
+        setCategorySuccess('Catégorie modifiée avec succès.');
+      } else {
+        if (window.electronAPI?.createCategory) {
+          const res = await window.electronAPI.createCategory({
+            name: categoryForm.name.trim(),
+            code: categoryForm.code.trim() || undefined,
+            color: categoryForm.color
+          });
+          if (!res.success) {
+            setCategoryError(res.message || 'Erreur lors de la création');
+            return;
+          }
+          if (res.id) {
+            setProductForm(f => ({ ...f, category_id: res.id! }));
+          }
+        } else {
+          const newId = Date.now();
+          setCategories(prev => [...prev, { id: newId, name: categoryForm.name.trim(), code: categoryForm.code.trim(), color: categoryForm.color }]);
+          setProductForm(f => ({ ...f, category_id: newId }));
+        }
+        setCategorySuccess('Nouvelle catégorie créée avec succès.');
+      }
+
+      await loadCategories();
+      setEditingCategory(null);
+      setCategoryForm({ name: '', code: '', color: '#16a34a' });
+      setTimeout(() => setCategorySuccess(''), 3000);
+    } catch (err: any) {
+      setCategoryError(err.message || 'Erreur lors de l\'enregistrement.');
+    }
+  };
+
+  const handleDeleteCategory = async (cat: Category) => {
+    const count = cat.product_count || 0;
+    const msg = count > 0 
+      ? `Supprimer la catégorie "${cat.name}" ?\n\n${count} produit(s) sont dans cette catégorie et seront réassignés à une autre catégorie.`
+      : `Supprimer la catégorie "${cat.name}" ?`;
+    if (!window.confirm(msg)) return;
+
+    try {
+      if (window.electronAPI?.deleteCategory) {
+        const res = await window.electronAPI.deleteCategory(cat.id);
+        if (!res.success) {
+          setCategoryError(res.message || 'Impossible de supprimer cette catégorie');
+          return;
+        }
+      }
+      await loadCategories();
+      if (selectedCategory === cat.id) setSelectedCategory('all');
+      if (productForm.category_id === cat.id) {
+        const rem = categories.filter(c => c.id !== cat.id);
+        if (rem.length > 0) setProductForm(f => ({ ...f, category_id: rem[0].id }));
+      }
+      setCategorySuccess('Catégorie supprimée avec succès.');
+      setTimeout(() => setCategorySuccess(''), 3000);
+    } catch (err: any) {
+      setCategoryError(err.message || 'Erreur lors de la suppression.');
+    }
+  };
+
   // Helper: check if a category corresponds to Tabac & Cigarettes
   const isCigaretteCategory = (catId?: number) => {
     if (!catId) return false;
@@ -359,8 +471,34 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
     return code === 'tabac' || name.includes('tabac') || name.includes('cig');
   };
 
+  // ── Invoice PDF Import Modal State ──
+  const [isInvoicePdfModalOpen, setIsInvoicePdfModalOpen] = useState<boolean>(false);
+  const [invoicePdfFileName, setInvoicePdfFileName] = useState<string>('');
+  const [invoicePdfLoading, setInvoicePdfLoading] = useState<boolean>(false);
+  const [invoiceParsedRows, setInvoiceParsedRows] = useState<Array<{
+    id: number;
+    selected: boolean;
+    rawName: string;
+    quantity: number;
+    purchasePrice: number;
+    total: number;
+    matchedProduct: Product | null;
+    matchScore: number;
+    suggestions: Array<{ product: Product; score: number }>;
+  }>>([]);
+
   // Fast inline stock adjustment modal
   const [stockAdjustmentModal, setStockAdjustmentModal] = useState<{ product: Product; newStock: number } | null>(null);
+
+  // ── Achat Scan Mode ──
+  const [achatScanMode, setAchatScanMode] = useState<'select' | 'quantity'>('select');
+  const [highlightedProductId, setHighlightedProductId] = useState<number | null>(null);
+  const achatBarcodeBufferRef = useRef<string>('');
+  const achatBarcodeKeyTimesRef = useRef<number[]>([]);
+  const achatBarcodeClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stockQtyInputRef = useRef<HTMLInputElement | null>(null);
+  const cartScanInputRef = useRef<HTMLInputElement | null>(null);
+  const [cartScanValue, setCartScanValue] = useState<string>('');
 
   // Toast alert
   const [alert, setAlert] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -370,6 +508,134 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
       return () => clearTimeout(timer);
     }
   }, [alert]);
+
+  // Auto-focus barcode scan input when cart drawer opens
+  useEffect(() => {
+    if (isCartOpen) {
+      setTimeout(() => {
+        cartScanInputRef.current?.focus();
+      }, 100);
+    }
+  }, [isCartOpen]);
+
+  // ── Handle Select & Parse Invoice PDF ──
+  const handleSelectInvoicePdf = async () => {
+    setInvoicePdfLoading(true);
+    try {
+      if (window.electronAPI?.selectAndParseInvoicePdf) {
+        const res = await window.electronAPI.selectAndParseInvoicePdf();
+        if (res.canceled) return;
+        if (!res.success || !Array.isArray(res.items)) {
+          throw new Error(res.message || 'Impossible de lire le document PDF.');
+        }
+
+        if (res.items.length === 0) {
+          setAlert({
+            type: 'error',
+            message: 'Aucun article trouvé dans cette facture PDF. Veuillez vous assurer que le fichier contient du texte lisible.'
+          });
+          return;
+        }
+
+        // Retrieve full catalog for comprehensive matching
+        let catalog = products;
+        if (window.electronAPI?.getProducts) {
+          try {
+            const allRes = await window.electronAPI.getProducts({ pageSize: 2000 });
+            if (allRes.success && Array.isArray(allRes.products) && allRes.products.length > 0) {
+              catalog = allRes.products;
+            }
+          } catch (e) {
+            console.warn('Could not fetch full catalog, using local products', e);
+          }
+        }
+
+        const mapped = res.items.map((item: any, idx: number) => {
+          const { bestMatch, bestScore, suggestions } = findMatchingProducts(item.rawName, catalog);
+          return {
+            id: idx + 1,
+            selected: bestMatch !== null,
+            rawName: item.rawName,
+            quantity: Math.max(1, Number(item.quantity) || 1),
+            purchasePrice: Math.max(0, Number(item.purchasePrice) || 0),
+            total: Math.max(0, Number(item.total) || ((item.quantity || 1) * (item.purchasePrice || 0))),
+            matchedProduct: bestMatch,
+            matchScore: bestScore,
+            suggestions
+          };
+        });
+
+        setInvoicePdfFileName(res.fileName || 'facture.pdf');
+        setInvoiceParsedRows(mapped);
+        setIsInvoicePdfModalOpen(true);
+      } else {
+        setAlert({ type: 'error', message: 'Fonctionnalité d\'importation PDF disponible uniquement sous Electron.' });
+      }
+    } catch (err: any) {
+      console.error('Error selecting invoice PDF:', err);
+      setAlert({ type: 'error', message: err.message || 'Erreur lors de la lecture du fichier PDF' });
+    } finally {
+      setInvoicePdfLoading(false);
+    }
+  };
+
+  // ── Confirm & Transfer Invoice Items into Purchase Cart ──
+  const handleConfirmInvoiceImport = () => {
+    const validRows = invoiceParsedRows.filter(r => r.selected && r.matchedProduct);
+    if (validRows.length === 0) {
+      setAlert({ type: 'error', message: 'Veuillez cocher au moins un article avec un produit associé.' });
+      return;
+    }
+
+    setCart(prev => {
+      let nextCart = [...prev];
+      for (const row of validRows) {
+        const prod = row.matchedProduct!;
+        const defaultUnit = prod.units?.find(u => u.is_default) || prod.units?.[0];
+        const unitName = defaultUnit?.unit_name || prod.base_unit;
+        const factor = defaultUnit?.conversion_factor || 1;
+        const purchasePrice = row.purchasePrice > 0 ? row.purchasePrice : (prod.cost_price || 0) * factor;
+        const sellingPrice = defaultUnit?.selling_price || prod.selling_price || 0;
+        const quantity = row.quantity > 0 ? row.quantity : 1;
+
+        const existingIdx = nextCart.findIndex(item => item.productId === prod.id && item.unitName === unitName);
+        if (existingIdx > -1) {
+          nextCart[existingIdx] = {
+            ...nextCart[existingIdx],
+            quantity: nextCart[existingIdx].quantity + quantity,
+            price: purchasePrice,
+            purchasePrice: purchasePrice
+          };
+        } else {
+          nextCart = [
+            {
+              productId: prod.id,
+              productName: prod.name,
+              sku: prod.sku,
+              unitName,
+              conversionFactor: factor,
+              price: purchasePrice,
+              purchasePrice,
+              sellingPrice,
+              quantity,
+              supplierId: prod.primary_supplier_id,
+              supplierName: prod.supplier_name,
+              caisseId: prod.caisse_id || undefined,
+              caisseName: prod.caisse_name || undefined
+            },
+            ...nextCart
+          ];
+        }
+      }
+      return nextCart;
+    });
+
+    setAlert({
+      type: 'success',
+      message: `✅ ${validRows.length} article(s) de la facture PDF importé(s) dans le bon de commande !`
+    });
+    setIsInvoicePdfModalOpen(false);
+  };
 
   // Persist cart
   useEffect(() => {
@@ -953,6 +1219,111 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
     }
   };
 
+  // ── Achat Scan: process a scanned barcode in the cart panel ──
+  const processAchatBarcode = useCallback(async (code: string, modeOverride?: 'select' | 'quantity') => {
+    const activeMode = modeOverride || achatScanMode;
+    if (!code) return;
+    const trimmed = code.trim();
+    if (!trimmed) return;
+
+    // 1. First search in already loaded products
+    let found: Product | undefined = products.find(p =>
+      p.barcode === trimmed ||
+      p.barcode === trimmed.replace(/^0/, '') ||
+      ('0' + (p.barcode || '')) === trimmed ||
+      p.sku === trimmed ||
+      p.units?.some(u => u.barcode === trimmed)
+    );
+
+    // 2. If not found in current page, search via backend IPC
+    if (!found && window.electronAPI?.getProducts) {
+      try {
+        const res = await window.electronAPI.getProducts({ search: trimmed, pageSize: 5 });
+        if (res.success && Array.isArray(res.products) && res.products.length > 0) {
+          found = res.products.find((p: Product) =>
+            p.barcode === trimmed ||
+            p.barcode === trimmed.replace(/^0/, '') ||
+            ('0' + (p.barcode || '')) === trimmed ||
+            p.sku === trimmed ||
+            p.units?.some(u => u.barcode === trimmed)
+          ) || res.products[0];
+        }
+      } catch (err) {
+        console.error('Error searching product by barcode:', err);
+      }
+    }
+
+    if (!found) {
+      setAlert({ type: 'error', message: `⚠️ Code-barres non trouvé : ${trimmed}` });
+      setCartScanValue('');
+      return;
+    }
+
+    setCartScanValue('');
+    setHighlightedProductId(found.id);
+    handleAddToCart(found);
+
+    if (activeMode === 'select') {
+      setAlert({ type: 'success', message: `✅ Produit ajouté : ${found.name}` });
+      setTimeout(() => {
+        setHighlightedProductId(prev => prev === found!.id ? null : prev);
+      }, 2500);
+    } else if (activeMode === 'quantity') {
+      setAlert({ type: 'success', message: `📦 ${found.name} : Tapez la quantité` });
+      // In mode 2: immediately focus quantity input for this product
+      setTimeout(() => {
+        const qtyInput = document.getElementById(`cart-qty-${found!.id}`) as HTMLInputElement | null;
+        if (qtyInput) {
+          qtyInput.focus();
+          qtyInput.select();
+        }
+      }, 120);
+    }
+  }, [achatScanMode, products]);
+
+  // ── Achat Scan: global keydown listener (active when cart is open) ──
+  useEffect(() => {
+    if (!isCartOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      // Ignore modifier-only keys
+      if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return;
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+      if (tag === 'textarea' || tag === 'select') return;
+      if (tag === 'input') {
+        const inputEl = e.target as HTMLInputElement;
+        const isScanInput = cartScanInputRef.current && inputEl === cartScanInputRef.current;
+        const isCartQtyInput = inputEl.id?.startsWith('cart-qty-');
+        if (!isScanInput && !isCartQtyInput) return;
+        if (isCartQtyInput && e.key !== 'Enter') return; // let user type numbers in qty, but if they scan and Enter fires, allow scan
+      }
+
+      const now = Date.now();
+      if (e.key === 'Enter') {
+        const buf = achatBarcodeBufferRef.current;
+        achatBarcodeBufferRef.current = '';
+        achatBarcodeKeyTimesRef.current = [];
+        if (achatBarcodeClearTimerRef.current) clearTimeout(achatBarcodeClearTimerRef.current);
+        if (buf.length >= 3) {
+          processAchatBarcode(buf);
+        }
+        return;
+      }
+
+      // Buffer printable characters
+      if (e.key.length === 1) {
+        achatBarcodeBufferRef.current += e.key;
+        achatBarcodeKeyTimesRef.current.push(now);
+        if (achatBarcodeClearTimerRef.current) clearTimeout(achatBarcodeClearTimerRef.current);
+        achatBarcodeClearTimerRef.current = setTimeout(() => {
+          achatBarcodeBufferRef.current = '';
+          achatBarcodeKeyTimesRef.current = [];
+        }, 400);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [isCartOpen, processAchatBarcode]);
+
   // Open Product Modal (Create or Edit)
   const handleOpenProductModal = (product?: Product) => {
     if (!isAdmin) {
@@ -1520,6 +1891,33 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
             >
               {t.allCategories}
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                setCategoryError('');
+                setCategorySuccess('');
+                setEditingCategory(null);
+                setCategoryForm({ name: '', code: '', color: '#16a34a' });
+                setIsManageCategoriesOpen(true);
+              }}
+              title="Gérer les catégories de produits"
+              style={{
+                padding: '5px 11px',
+                borderRadius: '20px',
+                border: '1px dashed #94a3b8',
+                background: '#ffffff',
+                color: '#475569',
+                fontSize: '11px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px'
+              }}
+            >
+              <Settings size={12} />
+              <span>Gérer</span>
+            </button>
             {categories.map(cat => (
               <button
                 key={cat.id}
@@ -1776,11 +2174,13 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
 
                   return (
                     <tr 
-                      key={product.id} 
+                      key={product.id}
+                      id={`product-row-${product.id}`}
                       style={{ 
                         borderBottom: '1px solid #f1f5f9',
-                        background: isOut ? '#fffdfd' : 'transparent',
-                        transition: 'background 0.15s'
+                        background: highlightedProductId === product.id ? '#fefce8' : (isOut ? '#fffdfd' : 'transparent'),
+                        outline: highlightedProductId === product.id ? '2px solid #eab308' : 'none',
+                        transition: 'background 0.2s, outline 0.2s'
                       }}
                     >
                       {/* 1. Article & Référence */}
@@ -3369,8 +3769,10 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                 Nouveau stock ({stockAdjustmentModal.product.base_unit}) :
               </label>
               <input
+                ref={stockQtyInputRef}
                 type="number"
                 step="any"
+                autoFocus
                 value={stockAdjustmentModal.newStock}
                 onChange={e => setStockAdjustmentModal({ ...stockAdjustmentModal, newStock: parseFloat(e.target.value) || 0 })}
                 className="input-clean"
@@ -3578,6 +3980,167 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
               </div>
             </div>
 
+            {/* ── Scan Zone ── */}
+            <div style={{
+              padding: '12px 20px',
+              background: '#f8fafc',
+              borderBottom: '2px solid #e2e8f0',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '10px',
+              flexShrink: 0
+            }}>
+              {/* Double mode toggle buttons */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 800, color: '#0f172a', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    📷 Mode Scanner :
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAchatScanMode('select')}
+                    style={{
+                      padding: '5px 12px',
+                      borderRadius: '6px',
+                      border: achatScanMode === 'select' ? '2px solid #2563eb' : '1px solid #cbd5e1',
+                      background: achatScanMode === 'select' ? '#eff6ff' : '#ffffff',
+                      color: achatScanMode === 'select' ? '#1d4ed8' : '#64748b',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    <span>🔍</span>
+                    <span>Mode 1 : Sélection seule</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setAchatScanMode('quantity')}
+                    style={{
+                      padding: '5px 12px',
+                      borderRadius: '6px',
+                      border: achatScanMode === 'quantity' ? '2px solid #16a34a' : '1px solid #cbd5e1',
+                      background: achatScanMode === 'quantity' ? '#f0fdf4' : '#ffffff',
+                      color: achatScanMode === 'quantity' ? '#15803d' : '#64748b',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    <span>📦</span>
+                    <span>Mode 2 : Sélection + Quantité</span>
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft: 'auto' }}>
+                  <button
+                    type="button"
+                    onClick={handleSelectInvoicePdf}
+                    disabled={invoicePdfLoading}
+                    style={{
+                      padding: '5px 14px',
+                      borderRadius: '6px',
+                      border: '1px solid #0284c7',
+                      background: '#f0f9ff',
+                      color: '#0369a1',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      transition: 'all 0.15s ease'
+                    }}
+                    title="Sélectionner une facture d'achat PDF pour importer automatiquement les articles et quantités"
+                  >
+                    <FileText size={13} color="#0284c7" />
+                    <span>{invoicePdfLoading ? 'Lecture...' : '📄 Importer Facture PDF'}</span>
+                  </button>
+                  <span style={{ fontSize: '11px', color: '#64748b', fontStyle: 'italic' }}>
+                    {achatScanMode === 'select'
+                      ? 'Scan → Ajoute au bon de commande'
+                      : 'Scan → Ajoute et positionne le curseur sur la quantité'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Barcode input row with scan button */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{ position: 'relative', flex: 1, display: 'flex', alignItems: 'center' }}>
+                  <input
+                    ref={cartScanInputRef}
+                    type="text"
+                    placeholder="Scanner le code-barres ou saisir référence / EAN..."
+                    value={cartScanValue}
+                    autoComplete="off"
+                    onChange={e => setCartScanValue(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        processAchatBarcode(cartScanValue);
+                      }
+                    }}
+                    className="input-clean"
+                    style={{
+                      width: '100%',
+                      padding: '8px 12px',
+                      fontSize: '13px',
+                      fontFamily: 'monospace',
+                      fontWeight: 600,
+                      borderRadius: '8px',
+                      border: '2px solid #cbd5e1',
+                      borderColor: achatScanMode === 'quantity' ? '#86efac' : '#93c5fd',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+                      outline: 'none'
+                    }}
+                  />
+                  {cartScanValue && (
+                    <button
+                      type="button"
+                      onClick={() => setCartScanValue('')}
+                      style={{
+                        position: 'absolute',
+                        right: '8px',
+                        background: 'transparent',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: '#94a3b8',
+                        padding: '4px'
+                      }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => processAchatBarcode(cartScanValue)}
+                  className="btn-green"
+                  style={{
+                    padding: '8px 16px',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    flexShrink: 0
+                  }}
+                >
+                  <span>Ajouter</span>
+                </button>
+              </div>
+            </div>
+
             {/* ── Cart Item List (compact table rows) ── */}
             <div style={{ flexShrink: 0 }}>
               {cart.length === 0 ? (
@@ -3603,7 +4166,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                     {cart.map((item, index) => {
                       const lineTotal = item.price * item.quantity;
                       return (
-                        <tr key={index} style={{ borderBottom: '1px solid #f1f5f9', background: index % 2 === 0 ? '#ffffff' : '#fafbfc' }}>
+                        <tr key={index} id={`cart-row-${item.productId}`} style={{ borderBottom: '1px solid #f1f5f9', background: highlightedProductId === item.productId ? '#fefce8' : (index % 2 === 0 ? '#ffffff' : '#fafbfc'), transition: 'background 0.3s ease' }}>
                           {/* Product name + SKU + Caisse */}
                           <td style={{ padding: '7px 12px', maxWidth: '180px' }}>
                             <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '12px', lineHeight: 1.2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -3654,6 +4217,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                                 style={{ width: '22px', height: '26px', border: 'none', borderRight: '1px solid #e2e8f0', background: '#f8fafc', cursor: 'pointer', fontWeight: 700, fontSize: '13px', lineHeight: 1, padding: 0, color: '#475569' }}
                               >-</button>
                               <input
+                                id={`cart-qty-${item.productId}`}
                                 type="number"
                                 min="1"
                                 value={item.quantity || ''}
@@ -4495,6 +5059,796 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
         </div>
       )}
 
+
+      {/* ========================================================= */}
+      {/* MODAL: VERIFICATION & IMPORTATION FACTURE ACHAT PDF */}
+      {/* ========================================================= */}
+      {isInvoicePdfModalOpen && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(15, 23, 42, 0.7)',
+          zIndex: 1100,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '16px',
+          backdropFilter: 'blur(4px)'
+        }}>
+          <div className="clean-card" style={{
+            width: '980px',
+            maxWidth: '96vw',
+            maxHeight: '92vh',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            padding: 0,
+            animation: 'fadeIn 0.2s ease-out',
+            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.35)'
+          }}>
+            {/* Modal Header */}
+            <div style={{
+              padding: '16px 22px',
+              background: '#0f172a',
+              color: '#ffffff',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              borderBottom: '1px solid #1e293b'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{
+                  width: '36px',
+                  height: '36px',
+                  borderRadius: '8px',
+                  background: '#0369a1',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
+                  <FileText size={20} color="#ffffff" />
+                </div>
+                <div>
+                  <h3 style={{ fontSize: '16px', fontWeight: 800, color: '#ffffff', margin: 0 }}>
+                    📄 Importation de Facture d'Achat PDF (استيراد فاتورة شراء)
+                  </h3>
+                  <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                    Document : <strong style={{ color: '#38bdf8' }}>{invoicePdfFileName}</strong> — {invoiceParsedRows.length} article(s) détecté(s)
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsInvoicePdfModalOpen(false)}
+                style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '4px' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Explanation & Summary Banner */}
+            <div style={{
+              padding: '12px 22px',
+              background: '#f0f9ff',
+              borderBottom: '1px solid #bae6fd',
+              fontSize: '12px',
+              color: '#0369a1',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '10px'
+            }}>
+              <div>
+                💡 <strong>Recherche intelligente par mot & tolérance orthographique :</strong> Le système a scanné chaque mot de la désignation pour trouver le meilleur produit correspondant. Vous pouvez ajuster les quantités, prix ou changer de produit ci-dessous.
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <span style={{ fontWeight: 800, color: '#0c4a6e' }}>
+                  {invoiceParsedRows.filter(r => r.selected).length} / {invoiceParsedRows.length} cochés
+                </span>
+                <span style={{
+                  background: '#0284c7',
+                  color: '#ffffff',
+                  padding: '2px 8px',
+                  borderRadius: '6px',
+                  fontWeight: 800,
+                  fontSize: '11px'
+                }}>
+                  Total : {formatCurrency(invoiceParsedRows.filter(r => r.selected).reduce((s, r) => s + (r.quantity * r.purchasePrice), 0))}
+                </span>
+              </div>
+            </div>
+
+            {/* Table of Extracted Items */}
+            <div style={{ flex: 1, overflowY: 'auto', minHeight: '260px' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                <thead>
+                  <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0', position: 'sticky', top: 0, zIndex: 10 }}>
+                    <th style={{ width: '40px', padding: '8px 12px', textAlign: 'center' }}>
+                      <input
+                        type="checkbox"
+                        checked={invoiceParsedRows.length > 0 && invoiceParsedRows.every(r => r.selected)}
+                        onChange={e => {
+                          const val = e.target.checked;
+                          setInvoiceParsedRows(prev => prev.map(r => ({ ...r, selected: val })));
+                        }}
+                        style={{ accentColor: '#16a34a' }}
+                      />
+                    </th>
+                    <th style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 800, color: '#475569' }}>
+                      Désignation Extrait (PDF)
+                    </th>
+                    <th style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 800, color: '#475569', minWidth: '260px' }}>
+                      Produit KMS Associé & Score
+                    </th>
+                    <th style={{ width: '90px', padding: '8px 8px', textAlign: 'center', fontWeight: 800, color: '#475569' }}>
+                      Qté
+                    </th>
+                    <th style={{ width: '110px', padding: '8px 8px', textAlign: 'right', fontWeight: 800, color: '#475569' }}>
+                      Prix Achat
+                    </th>
+                    <th style={{ width: '120px', padding: '8px 12px', textAlign: 'right', fontWeight: 800, color: '#16a34a' }}>
+                      Total Ligne
+                    </th>
+                    <th style={{ width: '40px', padding: '8px' }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {invoiceParsedRows.map(row => {
+                    const rowTotal = row.quantity * row.purchasePrice;
+                    const score = row.matchScore || 0;
+                    const scoreColor = score >= 80 ? '#16a34a' : score >= 50 ? '#d97706' : '#dc2626';
+                    const scoreBg = score >= 80 ? '#dcfce7' : score >= 50 ? '#fef3c7' : '#fee2e2';
+
+                    return (
+                      <tr
+                        key={row.id}
+                        style={{
+                          borderBottom: '1px solid #f1f5f9',
+                          background: row.selected ? '#ffffff' : '#f8fafc',
+                          opacity: row.selected ? 1 : 0.6
+                        }}
+                      >
+                        {/* Checkbox */}
+                        <td style={{ textAlign: 'center', padding: '8px 12px' }}>
+                          <input
+                            type="checkbox"
+                            checked={row.selected}
+                            onChange={e => {
+                              const val = e.target.checked;
+                              setInvoiceParsedRows(prev => prev.map(r => r.id === row.id ? { ...r, selected: val } : r));
+                            }}
+                            style={{ accentColor: '#16a34a' }}
+                          />
+                        </td>
+
+                        {/* Raw PDF Name */}
+                        <td style={{ padding: '8px 12px' }}>
+                          <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '12px' }}>
+                            {row.rawName}
+                          </div>
+                        </td>
+
+                        {/* Matched Product Select */}
+                        <td style={{ padding: '8px 12px' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <select
+                                value={row.matchedProduct ? row.matchedProduct.id : ''}
+                                onChange={e => {
+                                  const pId = Number(e.target.value);
+                                  const selectedProd = products.find(p => p.id === pId) || null;
+                                  setInvoiceParsedRows(prev => prev.map(r => {
+                                    if (r.id === row.id) {
+                                      return {
+                                        ...r,
+                                        matchedProduct: selectedProd,
+                                        matchScore: selectedProd ? 100 : 0
+                                      };
+                                    }
+                                    return r;
+                                  }));
+                                }}
+                                className="input-clean"
+                                style={{
+                                  fontSize: '11px',
+                                  padding: '4px 8px',
+                                  flex: 1,
+                                  borderColor: row.matchedProduct ? '#cbd5e1' : '#fca5a5',
+                                  background: row.matchedProduct ? '#ffffff' : '#fff5f5'
+                                }}
+                              >
+                                {!row.matchedProduct && (
+                                  <option value="">⚠️ Aucun produit associé — Choisir...</option>
+                                )}
+                                {row.matchedProduct && (
+                                  <option value={row.matchedProduct.id}>
+                                    ⭐ {row.matchedProduct.name} ({row.matchedProduct.sku})
+                                  </option>
+                                )}
+                                <optgroup label="Suggestions par pertinence">
+                                  {row.suggestions.map(s => (
+                                    <option key={s.product.id} value={s.product.id}>
+                                      {s.product.name} ({s.score}% - {s.product.sku})
+                                    </option>
+                                  ))}
+                                </optgroup>
+                                <optgroup label="Tous les articles du catalogue">
+                                  {products.map(p => (
+                                    <option key={p.id} value={p.id}>
+                                      {p.name} ({p.sku})
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              </select>
+
+                              {row.matchedProduct && (
+                                <span style={{
+                                  fontSize: '10px',
+                                  fontWeight: 800,
+                                  padding: '2px 6px',
+                                  borderRadius: '4px',
+                                  background: scoreBg,
+                                  color: scoreColor,
+                                  whiteSpace: 'nowrap'
+                                }}>
+                                  {score}%
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Quantity */}
+                        <td style={{ padding: '8px', textAlign: 'center' }}>
+                          <input
+                            type="number"
+                            min="1"
+                            step="any"
+                            value={row.quantity}
+                            onChange={e => {
+                              const val = parseFloat(e.target.value) || 0;
+                              setInvoiceParsedRows(prev => prev.map(r => r.id === row.id ? { ...r, quantity: val, total: val * r.purchasePrice } : r));
+                            }}
+                            className="input-clean"
+                            style={{ width: '70px', padding: '4px 6px', textAlign: 'center', fontSize: '12px', fontWeight: 700 }}
+                          />
+                        </td>
+
+                        {/* Purchase price */}
+                        <td style={{ padding: '8px', textAlign: 'right' }}>
+                          <input
+                            type="number"
+                            min="0"
+                            step="any"
+                            value={row.purchasePrice}
+                            onChange={e => {
+                              const val = parseFloat(e.target.value) || 0;
+                              setInvoiceParsedRows(prev => prev.map(r => r.id === row.id ? { ...r, purchasePrice: val, total: r.quantity * val } : r));
+                            }}
+                            className="input-clean"
+                            style={{ width: '90px', padding: '4px 6px', textAlign: 'right', fontSize: '12px', fontWeight: 700 }}
+                          />
+                        </td>
+
+                        {/* Total */}
+                        <td style={{ padding: '8px 12px', textAlign: 'right', fontWeight: 800, color: '#16a34a' }}>
+                          {formatCurrency(rowTotal)}
+                        </td>
+
+                        {/* Delete row */}
+                        <td style={{ padding: '8px', textAlign: 'center' }}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInvoiceParsedRows(prev => prev.filter(r => r.id !== row.id));
+                            }}
+                            style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '2px' }}
+                            title="Supprimer cette ligne"
+                          >
+                            <Trash2 size={13} color="#ef4444" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Modal Footer */}
+            <div style={{
+              padding: '14px 22px',
+              background: '#f8fafc',
+              borderTop: '1px solid #e2e8f0',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '12px'
+            }}>
+              <div style={{ fontSize: '13px', color: '#475569' }}>
+                Articles prêts : <strong style={{ color: '#0f172a' }}>{invoiceParsedRows.filter(r => r.selected && r.matchedProduct).length}</strong>
+                {' '}(Total : <strong style={{ color: '#16a34a' }}>{formatCurrency(invoiceParsedRows.filter(r => r.selected && r.matchedProduct).reduce((s, r) => s + (r.quantity * r.purchasePrice), 0))}</strong>)
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setIsInvoicePdfModalOpen(false)}
+                  className="btn-secondary"
+                  style={{ padding: '8px 16px', fontSize: '12px' }}
+                >
+                  Annuler
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleConfirmInvoiceImport}
+                  className="btn-green"
+                  style={{
+                    padding: '8px 20px',
+                    fontSize: '12px',
+                    fontWeight: 800,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <CheckCircle2 size={16} />
+                  <span>Ajouter au Bon de Commande ({invoiceParsedRows.filter(r => r.selected && r.matchedProduct).length})</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+
+      {/* ── MODAL GESTION DES CATÉGORIES ── */}
+      {isManageCategoriesOpen && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(15, 23, 42, 0.7)',
+          backdropFilter: 'blur(3px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1100,
+          padding: '16px'
+        }}>
+          <div style={{
+            background: '#ffffff',
+            borderRadius: '16px',
+            width: '100%',
+            maxWidth: '640px',
+            maxHeight: '90vh',
+            display: 'flex',
+            flexDirection: 'column',
+            boxShadow: '0 20px 25px -5px rgba(0,0,0,0.2)',
+            overflow: 'hidden'
+          }}>
+            {/* Modal Header */}
+            <div style={{
+              padding: '16px 20px',
+              borderBottom: '1px solid #e2e8f0',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              background: '#f8fafc'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{
+                  width: '36px',
+                  height: '36px',
+                  borderRadius: '10px',
+                  background: '#dcfce7',
+                  color: '#15803d',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}>
+                  <Tag size={18} />
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 800, color: '#0f172a' }}>
+                    Gestion des Catégories de Produits
+                  </h3>
+                  <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>
+                    Créez, modifiez et organisez vos catégories d'articles
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsManageCategoriesOpen(false);
+                  setEditingCategory(null);
+                  setCategoryError('');
+                  setCategorySuccess('');
+                }}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#64748b',
+                  cursor: 'pointer',
+                  padding: '6px',
+                  borderRadius: '6px'
+                }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div style={{ padding: '20px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {categoryError && (
+                <div style={{
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  background: '#fef2f2',
+                  border: '1px solid #fecaca',
+                  color: '#b91c1c',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px'
+                }}>
+                  <AlertTriangle size={16} />
+                  <span>{categoryError}</span>
+                </div>
+              )}
+
+              {categorySuccess && (
+                <div style={{
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  background: '#f0fdf4',
+                  border: '1px solid #bbf7d0',
+                  color: '#15803d',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px'
+                }}>
+                  <CheckCircle2 size={16} />
+                  <span>{categorySuccess}</span>
+                </div>
+              )}
+
+              {/* Formulaire d'ajout / modification */}
+              <form onSubmit={handleSaveCategory} style={{
+                background: '#f8fafc',
+                border: '1.5px solid #e2e8f0',
+                borderRadius: '12px',
+                padding: '16px'
+              }}>
+                <div style={{ fontSize: '13px', fontWeight: 800, color: '#1e293b', marginBottom: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>{editingCategory ? '✏️ Modifier la catégorie' : '➕ Nouvelle catégorie'}</span>
+                  {editingCategory && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingCategory(null);
+                        setCategoryForm({ name: '', code: '', color: '#16a34a' });
+                      }}
+                      style={{ background: 'none', border: 'none', color: '#64748b', fontSize: '11px', cursor: 'pointer', textDecoration: 'underline' }}
+                    >
+                      Annuler la modification
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                  <div>
+                    <label style={{ fontSize: '11px', fontWeight: 700, color: '#475569', display: 'block', marginBottom: '4px' }}>
+                      Nom de la catégorie *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="ex: Confiserie & Snacks..."
+                      value={categoryForm.name}
+                      onChange={e => setCategoryForm(f => ({ ...f, name: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        boxSizing: 'border-box',
+                        padding: '8px 10px',
+                        borderRadius: '6px',
+                        border: '1px solid #cbd5e1',
+                        fontSize: '12px',
+                        outline: 'none',
+                        background: '#ffffff'
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '11px', fontWeight: 700, color: '#475569', display: 'block', marginBottom: '4px' }}>
+                      Code court (optionnel)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="ex: CONF"
+                      value={categoryForm.code}
+                      onChange={e => setCategoryForm(f => ({ ...f, code: e.target.value.toUpperCase() }))}
+                      style={{
+                        width: '100%',
+                        boxSizing: 'border-box',
+                        padding: '8px 10px',
+                        borderRadius: '6px',
+                        border: '1px solid #cbd5e1',
+                        fontSize: '12px',
+                        outline: 'none',
+                        background: '#ffffff'
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {/* Color Palette Picker */}
+                <div style={{ marginBottom: '14px' }}>
+                  <label style={{ fontSize: '11px', fontWeight: 700, color: '#475569', display: 'block', marginBottom: '6px' }}>
+                    Couleur du badge :
+                  </label>
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                    {[
+                      { hex: '#16a34a', name: 'Vert' },
+                      { hex: '#2563eb', name: 'Bleu' },
+                      { hex: '#dc2626', name: 'Rouge' },
+                      { hex: '#ea580c', name: 'Orange' },
+                      { hex: '#d97706', name: 'Ambre' },
+                      { hex: '#7c3aed', name: 'Violet' },
+                      { hex: '#0891b2', name: 'Cyan' },
+                      { hex: '#db2777', name: 'Rose' },
+                      { hex: '#475569', name: 'Gris' }
+                    ].map(col => {
+                      const isSelected = categoryForm.color.toLowerCase() === col.hex.toLowerCase();
+                      return (
+                        <button
+                          type="button"
+                          key={col.hex}
+                          onClick={() => setCategoryForm(f => ({ ...f, color: col.hex }))}
+                          title={col.name}
+                          style={{
+                            width: '26px',
+                            height: '26px',
+                            borderRadius: '50%',
+                            background: col.hex,
+                            border: isSelected ? '3px solid #0f172a' : '2px solid #ffffff',
+                            boxShadow: isSelected ? '0 0 0 2px rgba(15,23,42,0.3)' : '0 1px 3px rgba(0,0,0,0.15)',
+                            cursor: 'pointer',
+                            padding: 0,
+                            position: 'relative'
+                          }}
+                        />
+                      );
+                    })}
+                    <input
+                      type="color"
+                      value={categoryForm.color}
+                      onChange={e => setCategoryForm(f => ({ ...f, color: e.target.value }))}
+                      title="Couleur personnalisée"
+                      style={{
+                        width: '32px',
+                        height: '28px',
+                        padding: 0,
+                        border: '1px solid #cbd5e1',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        background: 'none'
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                  <button
+                    type="submit"
+                    style={{
+                      background: '#16a34a',
+                      color: '#ffffff',
+                      border: 'none',
+                      padding: '8px 18px',
+                      borderRadius: '6px',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
+                    }}
+                  >
+                    <CheckCircle2 size={14} />
+                    <span>{editingCategory ? 'Enregistrer les modifications' : 'Ajouter la catégorie'}</span>
+                  </button>
+                </div>
+              </form>
+
+              {/* Liste des catégories existantes */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <div style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
+                    Catégories existantes ({categories.length})
+                  </div>
+                  <div style={{ position: 'relative', width: '200px' }}>
+                    <Search size={13} style={{ position: 'absolute', left: '8px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+                    <input
+                      type="text"
+                      placeholder="Filtrer..."
+                      value={categorySearch}
+                      onChange={e => setCategorySearch(e.target.value)}
+                      style={{
+                        width: '100%',
+                        boxSizing: 'border-box',
+                        padding: '5px 8px 5px 26px',
+                        borderRadius: '6px',
+                        border: '1px solid #e2e8f0',
+                        fontSize: '11px',
+                        outline: 'none'
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{
+                  border: '1px solid #e2e8f0',
+                  borderRadius: '10px',
+                  overflow: 'hidden',
+                  background: '#ffffff',
+                  maxHeight: '260px',
+                  overflowY: 'auto'
+                }}>
+                  {categories
+                    .filter(c => !categorySearch.trim() || c.name.toLowerCase().includes(categorySearch.toLowerCase()))
+                    .map((cat, idx) => (
+                      <div
+                        key={cat.id}
+                        style={{
+                          padding: '10px 14px',
+                          borderBottom: idx < categories.length - 1 ? '1px solid #f1f5f9' : 'none',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          background: editingCategory?.id === cat.id ? '#f0fdf4' : '#ffffff'
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <span style={{
+                            width: '12px',
+                            height: '12px',
+                            borderRadius: '50%',
+                            background: cat.color || '#16a34a',
+                            flexShrink: 0
+                          }} />
+                          <div>
+                            <span style={{ fontSize: '13px', fontWeight: 700, color: '#0f172a' }}>
+                              {cat.name}
+                            </span>
+                            {cat.code && (
+                              <span style={{
+                                marginLeft: '8px',
+                                fontSize: '10px',
+                                color: '#64748b',
+                                background: '#f1f5f9',
+                                padding: '1px 5px',
+                                borderRadius: '4px',
+                                fontWeight: 600
+                              }}>
+                                {cat.code}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <span style={{
+                            fontSize: '11px',
+                            color: '#64748b',
+                            background: '#f8fafc',
+                            padding: '3px 8px',
+                            borderRadius: '12px',
+                            border: '1px solid #e2e8f0',
+                            fontWeight: 600
+                          }}>
+                            {cat.product_count !== undefined ? `${cat.product_count} produit(s)` : 'Catégorie active'}
+                          </span>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingCategory(cat);
+                              setCategoryForm({
+                                name: cat.name,
+                                code: cat.code || '',
+                                color: cat.color || '#16a34a'
+                              });
+                              setCategoryError('');
+                              setCategorySuccess('');
+                            }}
+                            title="Modifier cette catégorie"
+                            style={{
+                              background: '#eff6ff',
+                              border: '1px solid #bfdbfe',
+                              color: '#1d4ed8',
+                              padding: '5px 8px',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              fontSize: '11px',
+                              fontWeight: 700
+                            }}
+                          >
+                            <Edit2 size={12} />
+                            <span>Modifier</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCategory(cat)}
+                            title="Supprimer cette catégorie"
+                            style={{
+                              background: '#fef2f2',
+                              border: '1px solid #fecaca',
+                              color: '#dc2626',
+                              padding: '5px 8px',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              fontSize: '11px',
+                              fontWeight: 700
+                            }}
+                          >
+                            <Trash2 size={12} />
+                            <span>Supprimer</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div style={{
+              padding: '12px 20px',
+              borderTop: '1px solid #e2e8f0',
+              display: 'flex',
+              justifyContent: 'flex-end',
+              background: '#f8fafc'
+            }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsManageCategoriesOpen(false);
+                  setEditingCategory(null);
+                  setCategoryError('');
+                  setCategorySuccess('');
+                }}
+                style={{
+                  background: '#ffffff',
+                  border: '1px solid #cbd5e1',
+                  color: '#475569',
+                  padding: '7px 16px',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                  cursor: 'pointer'
+                }}
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

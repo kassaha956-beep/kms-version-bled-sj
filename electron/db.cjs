@@ -1,6 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
+const bcrypt = require('bcryptjs');
 
 function initDatabase(userDataPath) {
   const dbDir = userDataPath || path.join(__dirname, '..');
@@ -854,11 +855,26 @@ function initDatabase(userDataPath) {
       INSERT INTO users (username, password, full_name, role, permissions)
       VALUES (?, ?, ?, ?, ?)
     `);
-    insertUser.run('admin', 'admin', 'System Administrator', 'admin', '["*"]');
-    insertUser.run('manager', 'manager', 'Account Manager', 'manager', '["*"]');
+    insertUser.run('admin', bcrypt.hashSync('admin', 10), 'System Administrator', 'admin', '["*"]');
+    insertUser.run('manager', bcrypt.hashSync('manager', 10), 'Account Manager', 'manager', '["*"]');
   } else {
     // Ensure admin user has all permissions
     db.prepare("UPDATE users SET permissions = '[\"*\"]' WHERE username = 'admin' AND (permissions IS NULL OR permissions = '' OR permissions = '[]')").run();
+  }
+
+  // 2b. Auto-upgrade any legacy plain-text passwords to bcrypt hashes
+  try {
+    const unhashedUsers = db.prepare('SELECT id, username, password FROM users').all();
+    const updatePwdStmt = db.prepare('UPDATE users SET password = ? WHERE id = ?');
+    for (const u of unhashedUsers) {
+      const isHashed = u.password && (u.password.startsWith('$2a$') || u.password.startsWith('$2b$'));
+      if (u.password && !isHashed) {
+        console.log('[DB] Encrypting password with bcrypt for user:', u.username);
+        updatePwdStmt.run(bcrypt.hashSync(u.password, 10), u.id);
+      }
+    }
+  } catch (migErr) {
+    console.error('[DB] Error auto-migrating passwords to bcrypt:', migErr);
   }
 
   // 3. Seed default product categories

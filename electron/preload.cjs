@@ -61,11 +61,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSupplierComparison: (id) => ipcRenderer.invoke('products:getSupplierComparison', id),
   getCategories: () => ipcRenderer.invoke('categories:getAll'),
   createCategory: (data) => ipcRenderer.invoke('categories:create', data),
+  updateCategory: (data) => ipcRenderer.invoke('categories:update', data),
+  deleteCategory: (id) => ipcRenderer.invoke('categories:delete', id),
   createCartOrder: (data) => ipcRenderer.invoke('cart:createOrder', data),
   getCartOrders: (filters) => ipcRenderer.invoke('cart:getOrders', filters),
   getCartOrderById: (id) => ipcRenderer.invoke('cart:getOrderById', id),
   deleteCartOrder: (id) => ipcRenderer.invoke('cart:deleteOrder', id),
   updateCartOrder: (data) => ipcRenderer.invoke('cart:updateOrder', data),
+  selectAndParseInvoicePdf: () => ipcRenderer.invoke('purchases:selectAndParseInvoicePdf'),
+  parseInvoicePdfBuffer: (base64Data) => ipcRenderer.invoke('purchases:parseInvoicePdfBuffer', base64Data),
 
   // Employees & Payroll
   getEmployees: (filters) => ipcRenderer.invoke('employees:getAll', filters),
