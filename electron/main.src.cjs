@@ -4361,6 +4361,46 @@ function setupIpcHandlers() {
       const id = typeof data === 'object' && data !== null ? data.id : data;
       const userName = (typeof data === 'object' && data !== null && data.user_name) ? data.user_name : 'Admin';
 
+      // Ensure trg_ventes_ad trigger is healthy (self-healing for PCs with existing DB)
+      try {
+        const trgCheck = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_ventes_ad'").get();
+        if (trgCheck && trgCheck.sql && trgCheck.sql.includes('OLD.total_revenue')) {
+          console.log('[ventes:delete] Auto-repairing legacy trg_ventes_ad trigger...');
+          db.exec('DROP TRIGGER IF EXISTS trg_ventes_ad');
+          db.exec(`
+            CREATE TRIGGER trg_ventes_ad
+            AFTER DELETE ON ventes
+            FOR EACH ROW
+            WHEN OLD.sale_status = 'completed'
+            BEGIN
+              UPDATE stats_daily_sales
+              SET sales_count = MAX(0, sales_count - 1),
+                  completed_count = MAX(0, completed_count - 1),
+                  subtotal = MAX(0, subtotal - OLD.subtotal),
+                  discount_amount = MAX(0, discount_amount - OLD.discount_amount),
+                  total_revenue = MAX(0, total_revenue - OLD.total_amount),
+                  total_cogs = MAX(0, total_cogs - OLD.total_cost),
+                  gross_profit = gross_profit - OLD.gross_profit,
+                  cash_received = MAX(0, cash_received - OLD.cash_received),
+                  credit_amount = MAX(0, credit_amount - OLD.credit_amount),
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE date = COALESCE(date(OLD.created_at), date('now'));
+
+              UPDATE stats_daily_users
+              SET sales_count = MAX(0, sales_count - 1),
+                  revenue = MAX(0, revenue - OLD.total_amount),
+                  gross_profit = gross_profit - OLD.gross_profit,
+                  cash_collected = MAX(0, cash_collected - OLD.cash_received),
+                  credit_issued = MAX(0, credit_issued - OLD.credit_amount),
+                  updated_at = CURRENT_TIMESTAMP
+              WHERE date = COALESCE(date(OLD.created_at), date('now')) AND user_id = OLD.user_id;
+            END;
+          `);
+        }
+      } catch (trgErr) {
+        console.warn('[ventes:delete] Auto-heal trg_ventes_ad warning:', trgErr.message);
+      }
+
       const vente = db.prepare('SELECT * FROM ventes WHERE id = ?').get(id);
       if (!vente) return { success: false, message: 'Vente introuvable' };
       const lignes = db.prepare('SELECT * FROM vente_lignes WHERE vente_id = ?').all(id);

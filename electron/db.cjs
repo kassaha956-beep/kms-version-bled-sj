@@ -21,6 +21,17 @@ function initDatabase(userDataPath) {
   db.pragma('busy_timeout = 5000');       // 5 s wait on locked DB
   db.pragma('optimize');                  // Run optimizer at open
 
+  // Self-healing migration for existing databases with legacy/corrupted triggers
+  try {
+    const trgCheck = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_ventes_ad'").get();
+    if (trgCheck && trgCheck.sql && trgCheck.sql.includes('OLD.total_revenue')) {
+      console.log('[DB] Detected legacy trg_ventes_ad trigger (OLD.total_revenue). Dropping to allow recreation...');
+      db.exec('DROP TRIGGER IF EXISTS trg_ventes_ad');
+    }
+  } catch (err) {
+    console.warn('[DB] Self-healing trigger check warning:', err.message);
+  }
+
   // Complete Schema definition - Direct table creation with all columns and constraints
   db.exec(`
     -- =====================
@@ -1366,7 +1377,8 @@ function initDatabase(userDataPath) {
       END;
 
       -- Ventes Delete: atomically reverses daily sales & daily cashier summaries
-      CREATE TRIGGER IF NOT EXISTS trg_ventes_ad
+      DROP TRIGGER IF EXISTS trg_ventes_ad;
+      CREATE TRIGGER trg_ventes_ad
       AFTER DELETE ON ventes
       FOR EACH ROW
       WHEN OLD.sale_status = 'completed'
@@ -1376,7 +1388,7 @@ function initDatabase(userDataPath) {
             completed_count = MAX(0, completed_count - 1),
             subtotal = MAX(0, subtotal - OLD.subtotal),
             discount_amount = MAX(0, discount_amount - OLD.discount_amount),
-            total_revenue = MAX(0, total_revenue - OLD.total_revenue),
+            total_revenue = MAX(0, total_revenue - OLD.total_amount),
             total_cogs = MAX(0, total_cogs - OLD.total_cost),
             gross_profit = gross_profit - OLD.gross_profit,
             cash_received = MAX(0, cash_received - OLD.cash_received),

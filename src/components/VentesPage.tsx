@@ -462,36 +462,71 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
       return;
     }
 
-    let desiredUnitName = targetUnitName;
+    const isCig = isCigaretteProduct(product);
 
-    // Intelligent cigarette memory logic:
-    if (!desiredUnitName && isCigaretteProduct(product)) {
-      if (lastSelectedItem && lastSelectedItem.product.id === product.id) {
-        // Same cigarette as last scanned: retain the active unit (e.g. 'Tige' or 'Paquet')
-        desiredUnitName = lastSelectedItem.unitName;
-      } else {
-        // Fresh / different product: default to Paquet (conversion_factor > 1)
-        const packUnit = product.units?.find(u => (u.conversion_factor || 1) > 1);
-        desiredUnitName = packUnit ? packUnit.unit_name : undefined;
-      }
-    }
-
-    let su: ProductUnit|null = null;
-    if (desiredUnitName && product.units) {
-      su = product.units.find(u => u.unit_name.toLowerCase() === desiredUnitName!.toLowerCase()) || null;
-    }
-    if (!su && isCigaretteProduct(product) && product.units) {
-      su = product.units.find(u => (u.conversion_factor || 1) > 1) || product.units.find(u => u.is_default) || product.units[0];
-    }
-    if (!su && product.units && product.units.length > 0) {
-      su = product.units.find(u => u.is_default) || product.units[0];
-    }
-    const unitName = su ? su.unit_name : (product.base_unit || 'Pièce');
-    const factor = su ? (Number(su.conversion_factor) || 1) : 1;
-    const sellPrice = su ? Number(su.selling_price) : Number(product.selling_price);
-    const costPrice = su && su.cost_price ? Number(su.cost_price) : (Number(product.cost_price) * factor);
-    setLastSelectedItem({ product, unitName });
     setCart(prev => {
+      // 1. Strict exclusivity for Cigarettes: at most ONE line per cigarette product in cart
+      if (isCig) {
+        const existingIdx = prev.findIndex(i => i.product.id === product.id);
+        if (existingIdx >= 0) {
+          const existingItem = prev[existingIdx];
+          // Inherit the existing unit already in the cart unless an explicit targetUnitName is requested
+          const effectiveUnitName = targetUnitName || existingItem.unit_name;
+          const uObj = product.units?.find(u => u.unit_name.toLowerCase() === effectiveUnitName.toLowerCase()) || null;
+          const factor = uObj ? (Number(uObj.conversion_factor) || 1) : (effectiveUnitName.toLowerCase().includes('paquet') ? 20 : 1);
+          const sellPrice = uObj ? Number(uObj.selling_price) : Number(product.selling_price);
+          const costPrice = uObj?.cost_price ? Number(uObj.cost_price) : (Number(product.cost_price) * factor);
+
+          const newQty = existingItem.quantity + 1;
+          if (newQty * factor > product.stock_quantity) {
+            showToast('Stock max atteint', 'error');
+            return prev;
+          }
+
+          const u = [...prev];
+          u[existingIdx] = {
+            ...existingItem,
+            unit_name: effectiveUnitName,
+            conversion_factor: factor,
+            selling_price: sellPrice,
+            cost_price: costPrice,
+            quantity: newQty
+          };
+
+          setLastSelectedItem({ product, unitName: effectiveUnitName });
+          setLastScannedDisplay({ name: product.name, unit: effectiveUnitName, price: sellPrice, qty: newQty });
+          sound.beep();
+          return u;
+        }
+      }
+
+      // 2. Normal addition (or fresh cigarette addition not yet in cart)
+      let desiredUnitName = targetUnitName;
+      if (!desiredUnitName && isCig) {
+        if (lastSelectedItem && lastSelectedItem.product.id === product.id) {
+          desiredUnitName = lastSelectedItem.unitName;
+        } else {
+          const packUnit = product.units?.find(u => (u.conversion_factor || 1) > 1);
+          desiredUnitName = packUnit ? packUnit.unit_name : undefined;
+        }
+      }
+
+      let su: ProductUnit|null = null;
+      if (desiredUnitName && product.units) {
+        su = product.units.find(u => u.unit_name.toLowerCase() === desiredUnitName!.toLowerCase()) || null;
+      }
+      if (!su && isCig && product.units) {
+        su = product.units.find(u => (u.conversion_factor || 1) > 1) || product.units.find(u => u.is_default) || product.units[0];
+      }
+      if (!su && product.units && product.units.length > 0) {
+        su = product.units.find(u => u.is_default) || product.units[0];
+      }
+      const unitName = su ? su.unit_name : (product.base_unit || 'Pièce');
+      const factor = su ? (Number(su.conversion_factor) || 1) : 1;
+      const sellPrice = su ? Number(su.selling_price) : Number(product.selling_price);
+      const costPrice = su && su.cost_price ? Number(su.cost_price) : (Number(product.cost_price) * factor);
+      setLastSelectedItem({ product, unitName });
+
       const idx = prev.findIndex(i => i.product.id === product.id && i.unit_name === unitName);
       if (idx >= 0) {
         if ((prev[idx].quantity + 1) * factor > product.stock_quantity) {
@@ -523,20 +558,38 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
     });
   };
 
-  const processBarcode = (code: string) => {
+  const processBarcode = async (code: string) => {
     const val = (code || '').trim();
     if (!val) return false;
     let mp: Product | undefined, mu: string | undefined;
 
+    const normalizeCode = (c: string) => {
+      return (c || '')
+        .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
+        .trim()
+        .replace(/^#+/, '')
+        .toLowerCase();
+    };
+
+    const normVal = normalizeCode(val);
+    const noZeroVal = normVal.replace(/^0+/, '');
+
     const matchVal = (b?: string) => {
       if (!b) return false;
-      const cleanB = b.trim();
-      if (cleanB.toLowerCase() === val.toLowerCase()) return true;
-      if (val.length === 13 && val.startsWith('0') && cleanB.toLowerCase() === val.slice(1).toLowerCase()) return true;
-      if (cleanB.length === 13 && cleanB.startsWith('0') && cleanB.slice(1).toLowerCase() === val.toLowerCase()) return true;
+      const normB = normalizeCode(b);
+      if (!normB) return false;
+      if (normB === normVal) return true;
+      // Difference de zero initial (EAN-13 vs UPC-A)
+      const noZeroB = normB.replace(/^0+/, '');
+      if (noZeroB && noZeroVal && noZeroB === noZeroVal) return true;
+      // Correspondance partielle si au moins 7 chiffres (cas du 1er chiffre tronqué par le scanner)
+      if (normVal.length >= 7 && normB.length >= 7) {
+        if (normVal.endsWith(normB) || normB.endsWith(normVal)) return true;
+      }
       return false;
     };
 
+    // 1. Recherche en mémoire
     for (const p of products) {
       if (p.units) {
         const u = p.units.find(u => matchVal(u.barcode));
@@ -544,8 +597,31 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
       }
     }
     if (!mp) {
-      mp = products.find(p => matchVal(p.barcode) || (p.sku && p.sku.trim().toLowerCase() === val.toLowerCase()));
+      mp = products.find(p => matchVal(p.barcode) || matchVal(p.sku));
     }
+
+    // 2. Recherche directe en base de données si non trouvé en cache
+    if (!mp && api?.getProducts) {
+      try {
+        const r = await api.getProducts({ search: normVal, pageSize: 5 });
+        if (r?.success && Array.isArray(r.products) && r.products.length > 0) {
+          const directMatch = r.products.find((p: any) => {
+            if (p.units?.some((u: any) => matchVal(u.barcode))) return true;
+            return matchVal(p.barcode) || matchVal(p.sku);
+          }) || r.products[0];
+
+          if (directMatch) {
+            mp = directMatch;
+            if (directMatch.units) {
+              const u = directMatch.units.find((u: any) => matchVal(u.barcode));
+              if (u) mu = u.unit_name;
+            }
+            setProducts(prev => prev.some(p => p.id === directMatch.id) ? prev : [directMatch, ...prev]);
+          }
+        }
+      } catch {}
+    }
+
     if (mp) {
       if (isCigaretteProduct(mp)) {
         if (lastSelectedItem && lastSelectedItem.product.id === mp.id) {
@@ -565,15 +641,23 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
     }
   };
 
-  const handleBarcodeScan = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleBarcodeScan = async (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
-    const val = barcodeScanVal.trim();
-    if (!val) return;
-    processBarcode(val);
+    const inputVal = (e.currentTarget?.value || barcodeScanVal || '').trim();
+    const buffered = barcodeBufferRef.current.trim();
+    // Utiliser le buffer plus long si le premier caractère a été manqué dans l'input
+    const finalCode = (buffered.length > inputVal.length && buffered.endsWith(inputVal))
+      ? buffered
+      : (inputVal || buffered);
+
+    barcodeBufferRef.current = '';
+    barcodeKeyTimesRef.current = [];
+    if (!finalCode) return;
+    await processBarcode(finalCode);
     setTimeout(() => {
       setBarcodeScanVal('');
-      barcodeInputRef.current?.select();
+      barcodeInputRef.current?.focus();
     }, 40);
   };
 
@@ -586,7 +670,8 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
     const singleUnit = p.units?.find(u => (u.conversion_factor || 1) === 1);
     const packName = packUnit?.unit_name || 'Paquet';
     const singleName = singleUnit?.unit_name || (isOcb ? 'Feuille' : 'Tige');
-    const curIsPack = lastSelectedItem.unitName === packName;
+
+    const curIsPack = (lastSelectedItem.unitName || '').toLowerCase() === packName.toLowerCase();
     const destName = curIsPack ? singleName : packName;
     const destObj = curIsPack ? singleUnit : packUnit;
     const factor = destObj ? (Number(destObj.conversion_factor) || 1) : (curIsPack ? 1 : 20);
@@ -594,33 +679,96 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
     const costPrice = destObj?.cost_price ? Number(destObj.cost_price) : (Number(p.cost_price) * factor);
 
     setCart(prev => {
-      const si = prev.findIndex(i => i.product.id === p.id && i.unit_name !== destName);
-      const di = prev.findIndex(i => i.product.id === p.id && i.unit_name === destName);
-      if (si >= 0) {
-        const u = [...prev], src = u[si];
-        if (src.quantity <= 1) u.splice(si, 1);
-        else u[si] = { ...src, quantity: src.quantity - 1 };
-        const ndi = u.findIndex(i => i.product.id === p.id && i.unit_name === destName);
-        if (ndi >= 0) {
-          u[ndi] = { ...u[ndi], quantity: u[ndi].quantity + 1 };
-        } else {
-          u.unshift({ product: p, unit_name: destName, conversion_factor: factor, selling_price: sellPrice, cost_price: costPrice, quantity: 1, discount_percent: 0 });
+      // Find if this cigarette already exists in the cart
+      const idx = prev.findIndex(i => i.product.id === p.id);
+      if (idx >= 0) {
+        const item = prev[idx];
+        let targetQty = item.quantity;
+
+        // Stock check when switching from tige to pack
+        if (!curIsPack && factor > 1) {
+          if (targetQty * factor > p.stock_quantity) {
+            const maxPacks = Math.floor(p.stock_quantity / factor);
+            if (maxPacks <= 0) {
+              showToast(`Stock insuffisant en paquet (dispo: ${p.stock_quantity} ${p.base_unit || 'tiges'})`, 'error');
+              return prev;
+            }
+            targetQty = maxPacks;
+            showToast(`Quantité ajustée à ${targetQty} paquet(s) (stock max)`, 'info');
+          }
         }
-        sound.beep();
-        return u;
-      } else if (di >= 0) {
+
         const u = [...prev];
-        u[di] = { ...u[di], quantity: u[di].quantity + 1 };
+        u[idx] = {
+          ...item,
+          unit_name: destName,
+          conversion_factor: factor,
+          selling_price: sellPrice,
+          cost_price: costPrice,
+          quantity: targetQty
+        };
         sound.beep();
+        showToast(`→ ${targetQty} ${destName} (${p.name})`, 'info');
         return u;
       } else {
         sound.beep();
-        return [{ product: p, unit_name: destName, conversion_factor: factor, selling_price: sellPrice, cost_price: costPrice, quantity: 1, discount_percent: 0 }, ...prev];
+        showToast(`Mode: ${destName} (${p.name})`, 'info');
+        return prev;
       }
     });
+
     setLastSelectedItem({ product: p, unitName: destName });
-    showToast(`→ ${destName} (${p.name})`, 'info');
     setTimeout(() => barcodeInputRef.current?.select(), 40);
+  };
+
+  const toggleCigaretteItemUnit = (cartIdx: number) => {
+    setCart(prev => {
+      if (cartIdx < 0 || cartIdx >= prev.length) return prev;
+      const item = prev[cartIdx];
+      const p = item.product;
+      if (!isCigaretteProduct(p)) return prev;
+
+      const isOcb = (p.name || '').toLowerCase().includes('ocb');
+      const packUnit = p.units?.find(u => (u.conversion_factor || 1) > 1);
+      const singleUnit = p.units?.find(u => (u.conversion_factor || 1) === 1);
+      const packName = packUnit?.unit_name || 'Paquet';
+      const singleName = singleUnit?.unit_name || (isOcb ? 'Feuille' : 'Tige');
+
+      const isCurrentPack = (item.unit_name || '').toLowerCase() === packName.toLowerCase();
+      const destName = isCurrentPack ? singleName : packName;
+      const destObj = isCurrentPack ? singleUnit : packUnit;
+      const factor = destObj ? (Number(destObj.conversion_factor) || 1) : (isCurrentPack ? 1 : 20);
+      const sellPrice = destObj ? Number(destObj.selling_price) : (isCurrentPack ? 20 : p.selling_price);
+      const costPrice = destObj?.cost_price ? Number(destObj.cost_price) : (Number(p.cost_price) * factor);
+
+      let targetQty = item.quantity;
+      if (!isCurrentPack && factor > 1) {
+        if (targetQty * factor > p.stock_quantity) {
+          const maxPacks = Math.floor(p.stock_quantity / factor);
+          if (maxPacks <= 0) {
+            showToast(`Stock insuffisant en paquet (dispo: ${p.stock_quantity} ${p.base_unit || 'tiges'})`, 'error');
+            return prev;
+          }
+          targetQty = maxPacks;
+          showToast(`Quantité ajustée à ${targetQty} paquet(s) (stock max)`, 'info');
+        }
+      }
+
+      const u = [...prev];
+      u[cartIdx] = {
+        ...item,
+        unit_name: destName,
+        conversion_factor: factor,
+        selling_price: sellPrice,
+        cost_price: costPrice,
+        quantity: targetQty
+      };
+
+      setLastSelectedItem({ product: p, unitName: destName });
+      sound.beep();
+      showToast(`→ ${targetQty} ${destName} (${p.name})`, 'info');
+      return u;
+    });
   };
 
   const updateCartQty = (idx: number, delta: number) => {
@@ -795,7 +943,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
   };
 
   useEffect(() => {
-    const kd = (e: KeyboardEvent) => {
+    const kd = async (e: KeyboardEvent) => {
       if (!isActive) return;
 
       const target = e.target as HTMLElement;
@@ -804,7 +952,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
       const isBarcodeInput = target === barcodeInputRef.current;
 
       // --- DÉTECTION AUTOMATIQUE DE CODE-BARRES PHYSIQUE ---
-      // Fonctionne même quand le champ de scan n'est PAS sélectionné !
+      // Fonctionne de manière 100% fiable même quand le champ n'est pas sélectionné !
       if (e.key === 'Enter') {
         const bufferedCode = barcodeBufferRef.current.trim();
         const keyTimes = barcodeKeyTimesRef.current;
@@ -814,7 +962,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
         if (barcodeClearTimerRef.current) clearTimeout(barcodeClearTimerRef.current);
 
         const isRapidScan = keyTimes.length >= 3 &&
-          ((keyTimes[keyTimes.length - 1] - keyTimes[0]) / (keyTimes.length - 1)) < 65;
+          ((keyTimes[keyTimes.length - 1] - keyTimes[0]) / (keyTimes.length - 1)) < 75;
 
         if (!isBarcodeInput && bufferedCode.length >= 2 && (!isInput || isRapidScan)) {
           e.preventDefault();
@@ -824,12 +972,11 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
             setProdSearch('');
           }
 
-          processBarcode(bufferedCode);
+          await processBarcode(bufferedCode);
 
           setTimeout(() => {
             setBarcodeScanVal('');
             barcodeInputRef.current?.focus();
-            barcodeInputRef.current?.select();
           }, 40);
           return;
         }
@@ -850,11 +997,6 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
           barcodeBufferRef.current = '';
           barcodeKeyTimesRef.current = [];
         }, 400);
-
-        if (!isInput) {
-          setBarcodeScanVal(barcodeBufferRef.current);
-          barcodeInputRef.current?.focus();
-        }
       }
 
       if (e.key === 'F2' || (e.key === '/' && !isInput)) {
@@ -1187,7 +1329,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
                   ref={barcodeInputRef}
                   value={barcodeScanVal}
                   onChange={e => setBarcodeScanVal(e.target.value)}
-                  onFocus={e => e.target.select()}
+                  onFocus={e => { if (e.target.value) e.target.select(); }}
                   onKeyDown={handleBarcodeScan}
                   placeholder={t.posScanBarcode}
                   style={{
@@ -1406,8 +1548,8 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
             overflowY: 'auto',
             padding: '8px 10px',
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))',
-            gap: '6px',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(138px, 1fr))',
+            gap: '8px',
             alignContent: 'start',
             background: '#f8fafc'
           }}>
@@ -1719,7 +1861,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
                     cursor: isOut ? 'not-allowed' : 'pointer',
                     boxShadow: product.is_favorite ? '0 1px 4px rgba(234,179,8,0.15)' : '0 1px 2px rgba(0,0,0,0.03)',
                     transition: 'transform 0.08s',
-                    minHeight: '70px',
+                    minHeight: '112px',
                     textAlign: isRtl ? 'right' : 'left'
                   }}
                   onMouseEnter={e => {
@@ -1758,18 +1900,25 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
                       {isCig ? formatCigaretteStock(product.stock_quantity, packFactor, isOcb) : `${product.stock_quantity} ${product.base_unit}`}
                     </span>
                   </div>
-                  <div style={{
-                    fontWeight: 800,
-                    fontSize: '11px',
-                    color: '#0f172a',
-                    lineHeight: 1.2,
-                    flex: 1,
-                    display: '-webkit-box',
-                    WebkitLineClamp: 2,
-                    WebkitBoxOrient: 'vertical',
-                    overflow: 'hidden',
-                    marginBottom: '5px'
-                  }}>
+                  <div
+                    title={product.name}
+                    style={{
+                      fontWeight: 800,
+                      fontSize: '12px',
+                      color: '#0f172a',
+                      lineHeight: '1.3',
+                      minHeight: '34px',
+                      flex: '1 0 auto',
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      wordBreak: 'break-word',
+                      overflowWrap: 'anywhere',
+                      margin: '4px 0 6px 0'
+                    }}
+                  >
                     {product.name}
                   </div>
                   <div style={{
@@ -2337,19 +2486,48 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
                     <Plus size={9}/>
                   </button>
 
-                  <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
-                    <div style={{ fontSize: '11px', fontWeight: 700, color: '#0f172a', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <div style={{ flex: 1, minWidth: 0, padding: '0 4px' }}>
+                    <div
+                      title={item.product.name}
+                      style={{
+                        fontSize: '11.5px',
+                        fontWeight: 800,
+                        color: '#0f172a',
+                        lineHeight: '1.25',
+                        display: '-webkit-box',
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        wordBreak: 'break-word',
+                        overflowWrap: 'anywhere'
+                      }}
+                    >
                       {item.product.name}
                     </div>
-                    <span style={{
-                      fontSize: '8px',
-                      fontWeight: 700,
-                      color: isCig ? '#b91c1c' : '#15803d',
-                      background: isCig ? '#fef2f2' : '#f0fdf4',
-                      padding: '0px 4px',
-                      borderRadius: '3px'
-                    }}>
-                      {item.unit_name}
+                    <span
+                      onClick={e => {
+                        if (isCig) {
+                          e.stopPropagation();
+                          toggleCigaretteItemUnit(idx);
+                        }
+                      }}
+                      style={{
+                        fontSize: '8.5px',
+                        fontWeight: 700,
+                        color: isCig ? '#b91c1c' : '#15803d',
+                        background: isCig ? '#fef2f2' : '#f0fdf4',
+                        border: isCig ? '1px dashed #fca5a5' : 'none',
+                        padding: '1px 5px',
+                        borderRadius: '3px',
+                        display: 'inline-block',
+                        marginTop: '2px',
+                        cursor: isCig ? 'pointer' : 'default',
+                        userSelect: 'none'
+                      }}
+                      title={isCig ? (currentLang === 'ar' ? 'انقر للتبديل علبة ↔ سيجارة' : 'Cliquer pour basculer Paquet ↔ Tige') : undefined}
+                    >
+                      {isCig ? `🔄 ${item.unit_name}` : item.unit_name}
                     </span>
                   </div>
 

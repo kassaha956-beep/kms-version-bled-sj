@@ -491,7 +491,8 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
   const [stockAdjustmentModal, setStockAdjustmentModal] = useState<{ product: Product; newStock: number } | null>(null);
 
   // ── Achat Scan Mode ──
-  const [achatScanMode, setAchatScanMode] = useState<'select' | 'quantity'>('select');
+  const [achatScanMode, setAchatScanMode] = useState<'select' | 'quantity' | 'total'>('select');
+  const [editingTotal, setEditingTotal] = useState<Record<number, string>>({});
   const [highlightedProductId, setHighlightedProductId] = useState<number | null>(null);
   const achatBarcodeBufferRef = useRef<string>('');
   const achatBarcodeKeyTimesRef = useRef<number[]>([]);
@@ -1220,7 +1221,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
   };
 
   // ── Achat Scan: process a scanned barcode in the cart panel ──
-  const processAchatBarcode = useCallback(async (code: string, modeOverride?: 'select' | 'quantity') => {
+  const processAchatBarcode = useCallback(async (code: string, modeOverride?: 'select' | 'quantity' | 'total') => {
     const activeMode = modeOverride || achatScanMode;
     if (!code) return;
     const trimmed = code.trim();
@@ -1278,6 +1279,17 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
           qtyInput.select();
         }
       }, 120);
+    } else if (activeMode === 'total') {
+      const pCost = found.cost_price || 0;
+      setAlert({ type: 'success', message: `💰 ${found.name} (P.A: ${formatCurrency(pCost)}) : Saisissez le montant total DA` });
+      // En mode 3: positionner immédiatement le curseur sur le Total DA
+      setTimeout(() => {
+        const totalInput = document.getElementById(`cart-total-${found!.id}`) as HTMLInputElement | null;
+        if (totalInput) {
+          totalInput.focus();
+          totalInput.select();
+        }
+      }, 120);
     }
   }, [achatScanMode, products]);
 
@@ -1293,8 +1305,9 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
         const inputEl = e.target as HTMLInputElement;
         const isScanInput = cartScanInputRef.current && inputEl === cartScanInputRef.current;
         const isCartQtyInput = inputEl.id?.startsWith('cart-qty-');
-        if (!isScanInput && !isCartQtyInput) return;
-        if (isCartQtyInput && e.key !== 'Enter') return; // let user type numbers in qty, but if they scan and Enter fires, allow scan
+        const isCartTotalInput = inputEl.id?.startsWith('cart-total-');
+        if (!isScanInput && !isCartQtyInput && !isCartTotalInput) return;
+        if ((isCartQtyInput || isCartTotalInput) && e.key !== 'Enter') return;
       }
 
       const now = Date.now();
@@ -4039,6 +4052,29 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                     <span>📦</span>
                     <span>Mode 2 : Sélection + Quantité</span>
                   </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setAchatScanMode('total')}
+                    style={{
+                      padding: '5px 12px',
+                      borderRadius: '6px',
+                      border: achatScanMode === 'total' ? '2px solid #d97706' : '1px solid #cbd5e1',
+                      background: achatScanMode === 'total' ? '#fffbeb' : '#ffffff',
+                      color: achatScanMode === 'total' ? '#b45309' : '#64748b',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      transition: 'all 0.15s ease'
+                    }}
+                    title="Scan → Curseur sur le Total DA (calcule automatiquement Qté = Total ÷ P.A)"
+                  >
+                    <span>💰</span>
+                    <span>Mode 3 : Calcul par Total DA</span>
+                  </button>
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginLeft: 'auto' }}>
@@ -4068,7 +4104,9 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                   <span style={{ fontSize: '11px', color: '#64748b', fontStyle: 'italic' }}>
                     {achatScanMode === 'select'
                       ? 'Scan → Ajoute au bon de commande'
-                      : 'Scan → Ajoute et positionne le curseur sur la quantité'}
+                      : achatScanMode === 'quantity'
+                      ? 'Scan → Ajoute et positionne sur la quantité'
+                      : 'Scan → Ajoute et positionne sur le Total DA (calcule Qté = Total ÷ P.A)'}
                   </span>
                 </div>
               </div>
@@ -4098,7 +4136,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                       fontWeight: 600,
                       borderRadius: '8px',
                       border: '2px solid #cbd5e1',
-                      borderColor: achatScanMode === 'quantity' ? '#86efac' : '#93c5fd',
+                      borderColor: achatScanMode === 'quantity' ? '#86efac' : achatScanMode === 'total' ? '#fde68a' : '#93c5fd',
                       boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
                       outline: 'none'
                     }}
@@ -4158,7 +4196,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                       <th style={{ padding: '7px 8px', textAlign: 'right', fontWeight: 700, color: '#475569', fontSize: '11px', whiteSpace: 'nowrap' }}>P.A</th>
                       <th style={{ padding: '7px 8px', textAlign: 'right', fontWeight: 700, color: '#475569', fontSize: '11px', whiteSpace: 'nowrap' }}>P.V</th>
                       <th style={{ padding: '7px 8px', textAlign: 'center', fontWeight: 700, color: '#475569', fontSize: '11px' }}>Qté</th>
-                      <th style={{ padding: '7px 12px', textAlign: 'right', fontWeight: 700, color: '#15803d', fontSize: '11px' }}>Total</th>
+                      <th style={{ padding: '7px 10px', textAlign: 'right', fontWeight: 700, color: '#15803d', fontSize: '11px', whiteSpace: 'nowrap' }} title="Tapez le montant total en DA pour calculer automatiquement la quantité (Total ÷ P.A)">Total DA ⚡ (Total ÷ P.A = Qté)</th>
                       <th style={{ padding: '7px 8px', width: '28px' }}></th>
                     </tr>
                   </thead>
@@ -4234,6 +4272,13 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                                     setCart(next);
                                   }
                                 }}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    cartScanInputRef.current?.focus();
+                                    cartScanInputRef.current?.select();
+                                  }
+                                }}
                                 onFocus={e => e.target.select()}
                                 style={{
                                   width: '45px',
@@ -4256,8 +4301,66 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                             </div>
                           </td>
                           {/* Line total */}
-                          <td style={{ padding: '7px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                            <span style={{ fontWeight: 800, color: '#15803d', fontSize: '13px' }} dir="ltr">{formatCurrency(lineTotal)}</span>
+                          {/* Total modifiable : saisissez le montant total pour calculer la quantité = Total / P.A */}
+                          <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            <div style={{ display: 'inline-flex', alignItems: 'center', border: '1.5px solid #86efac', borderRadius: '6px', overflow: 'hidden', background: '#ffffff', boxShadow: '0 1px 2px rgba(0,0,0,0.04)' }}>
+                              <input
+                                id={`cart-total-${item.productId}`}
+                                type="number"
+                                step="any"
+                                min="0"
+                                placeholder="Total DA"
+                                value={editingTotal[index] !== undefined ? editingTotal[index] : (lineTotal > 0 ? lineTotal : '')}
+                                onChange={e => {
+                                  const raw = e.target.value;
+                                  setEditingTotal(prev => ({ ...prev, [index]: raw }));
+                                  const tVal = parseFloat(raw);
+                                  if (!isNaN(tVal) && tVal >= 0 && item.price > 0) {
+                                    const exactQty = tVal / item.price;
+                                    const calcQty = Math.abs(exactQty - Math.round(exactQty)) < 0.001
+                                      ? Math.round(exactQty)
+                                      : parseFloat(exactQty.toFixed(2));
+                                    const next = [...cart];
+                                    next[index].quantity = Math.max(0, calcQty);
+                                    setCart(next);
+                                  }
+                                }}
+                                onBlur={() => {
+                                  setEditingTotal(prev => {
+                                    const n = { ...prev };
+                                    delete n[index];
+                                    return n;
+                                  });
+                                  if (!item.quantity || item.quantity <= 0) {
+                                    const next = [...cart];
+                                    next[index].quantity = 1;
+                                    setCart(next);
+                                  }
+                                }}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    cartScanInputRef.current?.focus();
+                                    cartScanInputRef.current?.select();
+                                  }
+                                }}
+                                onFocus={e => e.target.select()}
+                                title="Tapez le montant total en DA pour calculer automatiquement la quantité (Total ÷ P.A)"
+                                style={{
+                                  width: '76px',
+                                  height: '26px',
+                                  textAlign: 'right',
+                                  fontWeight: 800,
+                                  fontSize: '12px',
+                                  color: '#15803d',
+                                  border: 'none',
+                                  outline: 'none',
+                                  padding: '0 4px',
+                                  background: '#f0fdf4'
+                                }}
+                              />
+                              <span style={{ fontSize: '10px', color: '#16a34a', fontWeight: 800, padding: '0 4px', background: '#f0fdf4' }}>DA</span>
+                            </div>
                           </td>
                           {/* Remove */}
                           <td style={{ padding: '7px 8px', textAlign: 'center' }}>
