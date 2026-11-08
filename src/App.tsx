@@ -47,6 +47,7 @@ declare global {
       updateAccount: (data: any) => Promise<{ success: boolean; user?: any; message?: string }>;
       getAuditLogs: () => Promise<any[]>;
       getAppVersion: () => Promise<string>;
+    getUpdateInfo?: () => Promise<{ success: boolean; version: string; schemaVersion: number; lastUpgrade: string | null; migrations: any[] }>;
       getSettings: () => Promise<{ success: boolean; settings?: any; message?: string }>;
       saveSettings: (settings: any) => Promise<{ success: boolean; message?: string }>;
       getPrinters: () => Promise<{ success: boolean; printers?: any[]; message?: string }>;

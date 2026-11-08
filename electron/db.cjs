@@ -446,330 +446,493 @@ function initDatabase(userDataPath) {
     CREATE INDEX IF NOT EXISTS idx_client_payments_date ON client_payments(date);
   `);
 
-  // ==========================================
-  // SCHEMA MIGRATIONS (Add missing columns to existing DBs)
-  // ==========================================
-  const migrations = [
-    // products table - new columns
-    { sql: `ALTER TABLE products ADD COLUMN caisse_id INTEGER REFERENCES caisses(id) ON DELETE SET NULL` },
-    { sql: `ALTER TABLE products ADD COLUMN primary_supplier_id INTEGER REFERENCES fournisseurs(id) ON DELETE SET NULL` },
-    { sql: `ALTER TABLE products ADD COLUMN is_favorite INTEGER DEFAULT 0` },
-    // cart_orders table - new columns
-    { sql: `ALTER TABLE cart_orders ADD COLUMN caisse_id INTEGER REFERENCES caisses(id) ON DELETE SET NULL` },
-    { sql: `ALTER TABLE cart_orders ADD COLUMN caisse_transaction_id INTEGER REFERENCES caisse_transactions(id) ON DELETE SET NULL` },
-    { sql: `ALTER TABLE cart_orders ADD COLUMN payment_method TEXT DEFAULT 'especes'` },
-    { sql: `ALTER TABLE cart_orders ADD COLUMN user_name TEXT DEFAULT 'Admin'` },
-    { sql: `ALTER TABLE cart_orders ADD COLUMN paid_amount REAL DEFAULT 0` },
-    { sql: `ALTER TABLE cart_orders ADD COLUMN credit_amount REAL DEFAULT 0` },
-    // caisse_transactions - new columns
-    { sql: `ALTER TABLE caisse_transactions ADD COLUMN session_id INTEGER REFERENCES caisse_sessions(id) ON DELETE SET NULL` },
-    { sql: `ALTER TABLE caisse_transactions ADD COLUMN category_id INTEGER REFERENCES caisse_transaction_categories(id) ON DELETE SET NULL` },
-    { sql: `ALTER TABLE caisse_transactions ADD COLUMN category_name TEXT` },
-    { sql: `ALTER TABLE caisse_transactions ADD COLUMN payment_method TEXT DEFAULT 'especes'` },
-    { sql: `ALTER TABLE caisse_transactions ADD COLUMN destination_caisse_id INTEGER REFERENCES caisses(id) ON DELETE SET NULL` },
-    { sql: `ALTER TABLE caisse_transactions ADD COLUMN user_id INTEGER` },
-    { sql: `ALTER TABLE caisse_transactions ADD COLUMN user_name TEXT` },
-    { sql: `ALTER TABLE caisse_transactions ADD COLUMN balance_after REAL DEFAULT 0` },
-    // caisses - new columns
-    { sql: `ALTER TABLE caisses ADD COLUMN assigned_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL` },
-    { sql: `ALTER TABLE caisses ADD COLUMN last_opened_at TEXT` },
-    { sql: `ALTER TABLE caisses ADD COLUMN last_closed_at TEXT` },
-    { sql: `ALTER TABLE caisses ADD COLUMN is_default INTEGER DEFAULT 0` },
-    { sql: `ALTER TABLE caisses ADD COLUMN notes TEXT` },
-    // users - payroll columns (added for payroll without separate employees table)
-    { sql: `ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''` },
-    { sql: `ALTER TABLE users ADD COLUMN address TEXT DEFAULT ''` },
-    { sql: `ALTER TABLE users ADD COLUMN department TEXT DEFAULT ''` },
-    { sql: `ALTER TABLE users ADD COLUMN position TEXT DEFAULT ''` },
-    { sql: `ALTER TABLE users ADD COLUMN base_salary REAL DEFAULT 0` },
-    { sql: `ALTER TABLE users ADD COLUMN hire_date TEXT` },
-    { sql: `ALTER TABLE users ADD COLUMN emp_status TEXT DEFAULT 'actif'` },
-    { sql: `ALTER TABLE users ADD COLUMN cin TEXT DEFAULT ''` },
-    { sql: `ALTER TABLE users ADD COLUMN notes TEXT DEFAULT ''` },
-    { sql: `ALTER TABLE users ADD COLUMN permissions TEXT DEFAULT ''` },
-    // employee_advances
-    { sql: `ALTER TABLE employee_advances ADD COLUMN reference TEXT` },
-    // fournisseurs
-    { sql: `ALTER TABLE fournisseurs ADD COLUMN initial_credit REAL DEFAULT 0` },
-    { sql: `ALTER TABLE fournisseurs ADD COLUMN current_credit REAL DEFAULT 0` },
-    { sql: `ALTER TABLE fournisseurs ADD COLUMN ice TEXT` },
-    // vente_lignes
-    { sql: `ALTER TABLE vente_lignes ADD COLUMN conversion_factor REAL DEFAULT 1` },
-  ];
+  // =========================================================================
+  // AUTOMATIC SCHEMA MIGRATION SYSTEM (Seamless In-Place Setup Updates)
+  // =========================================================================
 
-  for (const m of migrations) {
-    try {
-      db.exec(m.sql);
-    } catch (e) {
-      // Column likely already exists — safe to ignore duplicate column errors
-      if (!e.message.includes('duplicate column name') && !e.message.includes('already exists')) {
-        console.warn('[DB] Migration warning:', e.message);
+  function createMigrationHelpers(targetDb) {
+    return {
+      db: targetDb,
+      hasTable(tableName) {
+        try {
+          const row = targetDb.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName);
+          return !!row;
+        } catch {
+          return false;
+        }
+      },
+      hasColumn(tableName, columnName) {
+        try {
+          const cols = targetDb.pragma(`table_info(${tableName})`);
+          return Array.isArray(cols) && cols.some(c => c.name.toLowerCase() === columnName.toLowerCase());
+        } catch {
+          return false;
+        }
+      },
+      addColumn(tableName, columnName, columnDefinition) {
+        if (this.hasTable(tableName) && !this.hasColumn(tableName, columnName)) {
+          console.log(`[DB Migration] Adding column '${columnName}' to table '${tableName}'...`);
+          targetDb.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
+          return true;
+        }
+        return false;
+      },
+      addTable(tableName, createTableSql) {
+        try {
+          targetDb.exec(createTableSql);
+          return true;
+        } catch (err) {
+          if (!err.message.includes('already exists')) {
+            console.warn(`[DB Migration] Notice on table '${tableName}':`, err.message);
+          }
+          return false;
+        }
+      },
+      addIndex(indexName, createIndexSql) {
+        try {
+          targetDb.exec(createIndexSql);
+          return true;
+        } catch (err) {
+          if (!err.message.includes('already exists')) {
+            console.warn(`[DB Migration] Notice on index '${indexName}':`, err.message);
+          }
+          return false;
+        }
+      },
+      dropTrigger(triggerName) {
+        try {
+          targetDb.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+          return true;
+        } catch (err) {
+          console.warn(`[DB Migration] Notice dropping trigger '${triggerName}':`, err.message);
+          return false;
+        }
+      },
+      replaceTrigger(triggerName, triggerSql) {
+        this.dropTrigger(triggerName);
+        try {
+          targetDb.exec(triggerSql);
+          return true;
+        } catch (err) {
+          console.warn(`[DB Migration] Notice recreating trigger '${triggerName}':`, err.message);
+          return false;
+        }
+      },
+      exec(sql) {
+        return targetDb.exec(sql);
+      }
+    };
+  }
+
+  // =========================================================================
+  // 💡 MIGRATIONS REGISTRY
+  // For any future feature, column, table, index or data fix:
+  // SIMPLY ADD A NEW MIGRATION OBJECT HERE WITH THE NEXT INCREMENTAL VERSION NUMBER!
+  // It will execute automatically on client machines when they run the update Setup!
+  // =========================================================================
+  const MIGRATIONS_REGISTRY = [
+    {
+      version: 1,
+      name: 'v3_2_3_baseline_complete_schema',
+      description: 'Baseline migration: ensures all tables, columns, indexes, and triggers exist across all machines',
+      up: (helpers) => {
+        // 1. Column additions for products
+        helpers.addColumn('products', 'caisse_id', 'INTEGER REFERENCES caisses(id) ON DELETE SET NULL');
+        helpers.addColumn('products', 'primary_supplier_id', 'INTEGER REFERENCES fournisseurs(id) ON DELETE SET NULL');
+        helpers.addColumn('products', 'is_favorite', 'INTEGER DEFAULT 0');
+
+        // 2. Column additions for cart_orders
+        helpers.addColumn('cart_orders', 'caisse_id', 'INTEGER REFERENCES caisses(id) ON DELETE SET NULL');
+        helpers.addColumn('cart_orders', 'caisse_transaction_id', 'INTEGER REFERENCES caisse_transactions(id) ON DELETE SET NULL');
+        helpers.addColumn('cart_orders', 'payment_method', "TEXT DEFAULT 'especes'");
+        helpers.addColumn('cart_orders', 'user_name', "TEXT DEFAULT 'Admin'");
+        helpers.addColumn('cart_orders', 'paid_amount', 'REAL DEFAULT 0');
+        helpers.addColumn('cart_orders', 'credit_amount', 'REAL DEFAULT 0');
+
+        // 3. Column additions for caisse_transactions
+        helpers.addColumn('caisse_transactions', 'session_id', 'INTEGER REFERENCES caisse_sessions(id) ON DELETE SET NULL');
+        helpers.addColumn('caisse_transactions', 'category_id', 'INTEGER REFERENCES caisse_transaction_categories(id) ON DELETE SET NULL');
+        helpers.addColumn('caisse_transactions', 'category_name', 'TEXT');
+        helpers.addColumn('caisse_transactions', 'payment_method', "TEXT DEFAULT 'especes'");
+        helpers.addColumn('caisse_transactions', 'destination_caisse_id', 'INTEGER REFERENCES caisses(id) ON DELETE SET NULL');
+        helpers.addColumn('caisse_transactions', 'user_id', 'INTEGER');
+        helpers.addColumn('caisse_transactions', 'user_name', 'TEXT');
+        helpers.addColumn('caisse_transactions', 'balance_after', 'REAL DEFAULT 0');
+
+        // 4. Column additions for caisses
+        helpers.addColumn('caisses', 'assigned_user_id', 'INTEGER REFERENCES users(id) ON DELETE SET NULL');
+        helpers.addColumn('caisses', 'last_opened_at', 'TEXT');
+        helpers.addColumn('caisses', 'last_closed_at', 'TEXT');
+        helpers.addColumn('caisses', 'is_default', 'INTEGER DEFAULT 0');
+        helpers.addColumn('caisses', 'notes', 'TEXT');
+
+        // 5. Column additions for users
+        helpers.addColumn('users', 'phone', "TEXT DEFAULT ''");
+        helpers.addColumn('users', 'address', "TEXT DEFAULT ''");
+        helpers.addColumn('users', 'department', "TEXT DEFAULT ''");
+        helpers.addColumn('users', 'position', "TEXT DEFAULT ''");
+        helpers.addColumn('users', 'base_salary', 'REAL DEFAULT 0');
+        helpers.addColumn('users', 'hire_date', 'TEXT');
+        helpers.addColumn('users', 'emp_status', "TEXT DEFAULT 'actif'");
+        helpers.addColumn('users', 'cin', "TEXT DEFAULT ''");
+        helpers.addColumn('users', 'notes', "TEXT DEFAULT ''");
+        helpers.addColumn('users', 'permissions', "TEXT DEFAULT ''");
+
+        // 6. Column additions for employee_advances
+        helpers.addColumn('employee_advances', 'reference', 'TEXT');
+
+        // 7. Column additions for fournisseurs
+        helpers.addColumn('fournisseurs', 'initial_credit', 'REAL DEFAULT 0');
+        helpers.addColumn('fournisseurs', 'current_credit', 'REAL DEFAULT 0');
+        helpers.addColumn('fournisseurs', 'ice', 'TEXT');
+
+        // 8. Column additions for vente_lignes
+        helpers.addColumn('vente_lignes', 'conversion_factor', 'REAL DEFAULT 1');
+
+        // 9. Table migrations: clients, client_debts, client_payments
+        helpers.addTable('clients', `CREATE TABLE IF NOT EXISTS clients (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          phone TEXT,
+          address TEXT,
+          credit_limit REAL DEFAULT 0,
+          current_debt REAL DEFAULT 0,
+          notes TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        helpers.addTable('client_debts', `CREATE TABLE IF NOT EXISTS client_debts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_id INTEGER NOT NULL,
+          order_id INTEGER,
+          product_id INTEGER,
+          product_name TEXT NOT NULL,
+          quantity REAL NOT NULL DEFAULT 1,
+          conversion_factor REAL NOT NULL DEFAULT 1,
+          unit_price REAL NOT NULL,
+          total_amount REAL NOT NULL,
+          paid_amount REAL DEFAULT 0,
+          remaining_amount REAL NOT NULL,
+          status TEXT DEFAULT 'en_cours',
+          date TEXT NOT NULL,
+          notes TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
+          FOREIGN KEY (order_id) REFERENCES cart_orders(id) ON DELETE SET NULL,
+          FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
+        )`);
+
+        helpers.addTable('client_payments', `CREATE TABLE IF NOT EXISTS client_payments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_id INTEGER NOT NULL,
+          debt_id INTEGER,
+          amount REAL NOT NULL,
+          payment_method TEXT DEFAULT 'especes',
+          caisse_id INTEGER,
+          caisse_transaction_id INTEGER,
+          date TEXT NOT NULL,
+          notes TEXT,
+          balance_before REAL DEFAULT 0,
+          balance_after REAL DEFAULT 0,
+          user_name TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
+          FOREIGN KEY (debt_id) REFERENCES client_debts(id) ON DELETE SET NULL,
+          FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE SET NULL,
+          FOREIGN KEY (caisse_transaction_id) REFERENCES caisse_transactions(id) ON DELETE SET NULL
+        )`);
+
+        // 10. Table migrations: Sales module
+        helpers.addTable('ventes', `CREATE TABLE IF NOT EXISTS ventes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sale_number TEXT UNIQUE NOT NULL,
+          client_id INTEGER,
+          client_name TEXT NOT NULL DEFAULT 'Client Anonyme',
+          user_id INTEGER NOT NULL,
+          user_name TEXT NOT NULL,
+          caisse_id INTEGER,
+          subtotal REAL NOT NULL DEFAULT 0,
+          discount_amount REAL NOT NULL DEFAULT 0,
+          total_amount REAL NOT NULL DEFAULT 0,
+          total_cost REAL NOT NULL DEFAULT 0,
+          gross_profit REAL NOT NULL DEFAULT 0,
+          cash_received REAL NOT NULL DEFAULT 0,
+          change_returned REAL NOT NULL DEFAULT 0,
+          credit_amount REAL NOT NULL DEFAULT 0,
+          payment_status TEXT NOT NULL DEFAULT 'paye',
+          sale_status TEXT NOT NULL DEFAULT 'completed',
+          notes TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE SET NULL,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+          FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE SET NULL
+        )`);
+
+        helpers.addTable('vente_lignes', `CREATE TABLE IF NOT EXISTS vente_lignes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          vente_id INTEGER NOT NULL,
+          product_id INTEGER,
+          product_name TEXT NOT NULL,
+          unit_name TEXT NOT NULL DEFAULT 'piece',
+          quantity REAL NOT NULL,
+          conversion_factor REAL NOT NULL DEFAULT 1,
+          cost_price_snapshot REAL NOT NULL DEFAULT 0,
+          selling_price_snapshot REAL NOT NULL DEFAULT 0,
+          discount_percent REAL NOT NULL DEFAULT 0,
+          line_total REAL NOT NULL DEFAULT 0,
+          line_profit REAL NOT NULL DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (vente_id) REFERENCES ventes(id) ON DELETE CASCADE,
+          FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
+        )`);
+
+        helpers.addTable('vente_paiements', `CREATE TABLE IF NOT EXISTS vente_paiements (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          vente_id INTEGER NOT NULL,
+          client_id INTEGER,
+          amount REAL NOT NULL,
+          payment_date TEXT NOT NULL,
+          user_id INTEGER,
+          user_name TEXT,
+          notes TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (vente_id) REFERENCES ventes(id) ON DELETE CASCADE,
+          FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE SET NULL
+        )`);
+
+        // 11. Table migrations: Stats & Aggregations
+        helpers.addTable('stats_daily_sales', `CREATE TABLE IF NOT EXISTS stats_daily_sales (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          date TEXT UNIQUE NOT NULL,
+          sales_count INTEGER DEFAULT 0,
+          completed_count INTEGER DEFAULT 0,
+          subtotal REAL DEFAULT 0,
+          discount_amount REAL DEFAULT 0,
+          total_revenue REAL DEFAULT 0,
+          total_cogs REAL DEFAULT 0,
+          gross_profit REAL DEFAULT 0,
+          cash_received REAL DEFAULT 0,
+          credit_amount REAL DEFAULT 0,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        helpers.addTable('stats_daily_products', `CREATE TABLE IF NOT EXISTS stats_daily_products (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          date TEXT NOT NULL,
+          product_id INTEGER NOT NULL,
+          product_name TEXT NOT NULL,
+          category_id INTEGER,
+          quantity_sold REAL DEFAULT 0,
+          revenue REAL DEFAULT 0,
+          cogs REAL DEFAULT 0,
+          gross_profit REAL DEFAULT 0,
+          sales_count INTEGER DEFAULT 0,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(date, product_id)
+        )`);
+
+        helpers.addTable('stats_daily_users', `CREATE TABLE IF NOT EXISTS stats_daily_users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          date TEXT NOT NULL,
+          user_id INTEGER NOT NULL,
+          user_name TEXT NOT NULL,
+          sales_count INTEGER DEFAULT 0,
+          revenue REAL DEFAULT 0,
+          gross_profit REAL DEFAULT 0,
+          cash_collected REAL DEFAULT 0,
+          credit_issued REAL DEFAULT 0,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(date, user_id)
+        )`);
+
+        helpers.addTable('stats_daily_caisses', `CREATE TABLE IF NOT EXISTS stats_daily_caisses (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          date TEXT NOT NULL,
+          caisse_id INTEGER NOT NULL,
+          total_in REAL DEFAULT 0,
+          total_out REAL DEFAULT 0,
+          net_change REAL DEFAULT 0,
+          closing_balance REAL,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(date, caisse_id)
+        )`);
+
+        helpers.addTable('stats_daily_credits', `CREATE TABLE IF NOT EXISTS stats_daily_credits (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          date TEXT UNIQUE NOT NULL,
+          credit_issued REAL DEFAULT 0,
+          credit_repaid REAL DEFAULT 0,
+          net_credit_change REAL DEFAULT 0,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        helpers.addTable('stats_daily_employees', `CREATE TABLE IF NOT EXISTS stats_daily_employees (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          date TEXT NOT NULL,
+          employee_id INTEGER NOT NULL,
+          total_advances REAL DEFAULT 0,
+          total_salaries REAL DEFAULT 0,
+          total_paid REAL DEFAULT 0,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(date, employee_id)
+        )`);
+
+        helpers.addTable('stats_inventory_summary', `CREATE TABLE IF NOT EXISTS stats_inventory_summary (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          total_items INTEGER DEFAULT 0,
+          total_stock_units REAL DEFAULT 0,
+          total_cost_value REAL DEFAULT 0,
+          total_selling_value REAL DEFAULT 0,
+          potential_profit REAL DEFAULT 0,
+          low_stock_count INTEGER DEFAULT 0,
+          out_of_stock_count INTEGER DEFAULT 0,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        helpers.addTable('stats_reconciliation_logs', `CREATE TABLE IF NOT EXISTS stats_reconciliation_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          reconciled_by TEXT NOT NULL,
+          date_from TEXT,
+          date_to TEXT,
+          status TEXT NOT NULL DEFAULT 'completed',
+          discrepancies_found INTEGER DEFAULT 0,
+          details TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        // 12. Create all essential indexes
+        const allIndexes = [
+          ['idx_products_caisse', 'CREATE INDEX IF NOT EXISTS idx_products_caisse ON products(caisse_id)'],
+          ['idx_products_category', 'CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)'],
+          ['idx_products_supplier', 'CREATE INDEX IF NOT EXISTS idx_products_supplier ON products(primary_supplier_id)'],
+          ['idx_cart_orders_caisse', 'CREATE INDEX IF NOT EXISTS idx_cart_orders_caisse ON cart_orders(caisse_id)'],
+          ['idx_cart_orders_user', 'CREATE INDEX IF NOT EXISTS idx_cart_orders_user ON cart_orders(user_name)'],
+          ['idx_caisse_transactions_session', 'CREATE INDEX IF NOT EXISTS idx_caisse_transactions_session ON caisse_transactions(session_id)'],
+          ['idx_caisse_transactions_category', 'CREATE INDEX IF NOT EXISTS idx_caisse_transactions_category ON caisse_transactions(category_id)'],
+          ['idx_caisse_sessions_caisse', 'CREATE INDEX IF NOT EXISTS idx_caisse_sessions_caisse ON caisse_sessions(caisse_id)'],
+          ['idx_caisse_sessions_status', 'CREATE INDEX IF NOT EXISTS idx_caisse_sessions_status ON caisse_sessions(status)'],
+          ['idx_caisses_status', 'CREATE INDEX IF NOT EXISTS idx_caisses_status ON caisses(status)'],
+          ['idx_caisses_default', 'CREATE INDEX IF NOT EXISTS idx_caisses_default ON caisses(is_default)'],
+          ['idx_clients_name', 'CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name)'],
+          ['idx_clients_phone', 'CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone)'],
+          ['idx_client_debts_client', 'CREATE INDEX IF NOT EXISTS idx_client_debts_client ON client_debts(client_id)'],
+          ['idx_client_debts_product', 'CREATE INDEX IF NOT EXISTS idx_client_debts_product ON client_debts(product_id)'],
+          ['idx_client_debts_status', 'CREATE INDEX IF NOT EXISTS idx_client_debts_status ON client_debts(status)'],
+          ['idx_client_debts_date', 'CREATE INDEX IF NOT EXISTS idx_client_debts_date ON client_debts(date)'],
+          ['idx_client_debts_client_status', 'CREATE INDEX IF NOT EXISTS idx_client_debts_client_status ON client_debts(client_id, status)'],
+          ['idx_client_payments_client', 'CREATE INDEX IF NOT EXISTS idx_client_payments_client ON client_payments(client_id)'],
+          ['idx_client_payments_date', 'CREATE INDEX IF NOT EXISTS idx_client_payments_date ON client_payments(date)'],
+          ['idx_ventes_date', 'CREATE INDEX IF NOT EXISTS idx_ventes_date ON ventes(created_at)'],
+          ['idx_ventes_client', 'CREATE INDEX IF NOT EXISTS idx_ventes_client ON ventes(client_id)'],
+          ['idx_ventes_user', 'CREATE INDEX IF NOT EXISTS idx_ventes_user ON ventes(user_id)'],
+          ['idx_ventes_status', 'CREATE INDEX IF NOT EXISTS idx_ventes_status ON ventes(payment_status)'],
+          ['idx_ventes_sale_number', 'CREATE INDEX IF NOT EXISTS idx_ventes_sale_number ON ventes(sale_number)'],
+          ['idx_vente_lignes_vente', 'CREATE INDEX IF NOT EXISTS idx_vente_lignes_vente ON vente_lignes(vente_id)'],
+          ['idx_vente_lignes_product', 'CREATE INDEX IF NOT EXISTS idx_vente_lignes_product ON vente_lignes(product_id)'],
+          ['idx_vente_paiements_vente', 'CREATE INDEX IF NOT EXISTS idx_vente_paiements_vente ON vente_paiements(vente_id)'],
+          ['idx_vente_paiements_client', 'CREATE INDEX IF NOT EXISTS idx_vente_paiements_client ON vente_paiements(client_id)'],
+          ['idx_stats_sales_date', 'CREATE INDEX IF NOT EXISTS idx_stats_sales_date ON stats_daily_sales(date)'],
+          ['idx_stats_prod_date', 'CREATE INDEX IF NOT EXISTS idx_stats_prod_date ON stats_daily_products(date)'],
+          ['idx_stats_prod_pid', 'CREATE INDEX IF NOT EXISTS idx_stats_prod_pid ON stats_daily_products(product_id)'],
+          ['idx_stats_prod_cat', 'CREATE INDEX IF NOT EXISTS idx_stats_prod_cat ON stats_daily_products(category_id)'],
+          ['idx_stats_user_date', 'CREATE INDEX IF NOT EXISTS idx_stats_user_date ON stats_daily_users(date)'],
+          ['idx_stats_user_uid', 'CREATE INDEX IF NOT EXISTS idx_stats_user_uid ON stats_daily_users(user_id)'],
+          ['idx_stats_caisse_date', 'CREATE INDEX IF NOT EXISTS idx_stats_caisse_date ON stats_daily_caisses(date)'],
+          ['idx_stats_caisse_cid', 'CREATE INDEX IF NOT EXISTS idx_stats_caisse_cid ON stats_daily_caisses(caisse_id)'],
+          ['idx_stats_credit_date', 'CREATE INDEX IF NOT EXISTS idx_stats_credit_date ON stats_daily_credits(date)'],
+          ['idx_stats_emp_date', 'CREATE INDEX IF NOT EXISTS idx_stats_emp_date ON stats_daily_employees(date)']
+        ];
+
+        for (const [name, sql] of allIndexes) {
+          helpers.addIndex(name, sql);
+        }
+
+        // 13. Ensure trg_ventes_ad is clean
+        helpers.dropTrigger('trg_ventes_ad');
       }
     }
-  }
-
-  // Migrate tables for clients & client debts
-  const tableMigrations = [
-    `CREATE TABLE IF NOT EXISTS clients (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      phone TEXT,
-      address TEXT,
-      notes TEXT,
-      current_debt REAL DEFAULT 0,
-      status TEXT DEFAULT 'active',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`,
-    `CREATE TABLE IF NOT EXISTS client_debts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      client_id INTEGER NOT NULL,
-      product_id INTEGER,
-      product_name TEXT NOT NULL,
-      unit_name TEXT DEFAULT 'pièce',
-      quantity REAL NOT NULL DEFAULT 1,
-      conversion_factor REAL DEFAULT 1,
-      unit_price REAL NOT NULL DEFAULT 0,
-      total_amount REAL NOT NULL,
-      paid_amount REAL DEFAULT 0,
-      remaining_amount REAL NOT NULL,
-      date TEXT NOT NULL,
-      caisse_id INTEGER,
-      caisse_transaction_id INTEGER,
-      notes TEXT,
-      status TEXT NOT NULL DEFAULT 'unpaid',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
-      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL,
-      FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE SET NULL,
-      FOREIGN KEY (caisse_transaction_id) REFERENCES caisse_transactions(id) ON DELETE SET NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS client_payments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      client_id INTEGER NOT NULL,
-      debt_id INTEGER,
-      amount REAL NOT NULL,
-      payment_method TEXT DEFAULT 'especes',
-      caisse_id INTEGER,
-      caisse_transaction_id INTEGER,
-      date TEXT NOT NULL,
-      notes TEXT,
-      balance_before REAL DEFAULT 0,
-      balance_after REAL DEFAULT 0,
-      user_name TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
-      FOREIGN KEY (debt_id) REFERENCES client_debts(id) ON DELETE SET NULL,
-      FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE SET NULL,
-      FOREIGN KEY (caisse_transaction_id) REFERENCES caisse_transactions(id) ON DELETE SET NULL
-    )`
   ];
-  for (const tSql of tableMigrations) {
-    try { db.exec(tSql); } catch (e) { console.warn('[DB] Table migration warning:', e.message); }
+
+  function runDatabaseMigrations(targetDb, currentDbPath, currentDbDir) {
+    targetDb.exec(`
+      CREATE TABLE IF NOT EXISTS _schema_migrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        version INTEGER UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        applied_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        execution_time_ms INTEGER DEFAULT 0
+      );
+    `);
+
+    const appliedRows = targetDb.prepare('SELECT version FROM _schema_migrations').all();
+    const appliedVersions = new Set(appliedRows.map(r => r.version));
+
+    const pending = MIGRATIONS_REGISTRY.filter(m => !appliedVersions.has(m.version))
+      .sort((a, b) => a.version - b.version);
+
+    if (pending.length === 0) {
+      const latest = MIGRATIONS_REGISTRY.length > 0 ? MIGRATIONS_REGISTRY[MIGRATIONS_REGISTRY.length - 1].version : 0;
+      console.log(`[DB Migration] Schema is up-to-date (Migration v${latest}).`);
+      return { applied: 0, currentVersion: latest };
+    }
+
+    console.log(`[DB Migration] 🚀 Found ${pending.length} pending migration(s) to apply.`);
+
+    // Automatic pre-migration backup for maximum safety
+    try {
+      const backupDir = path.join(currentDbDir, 'backups');
+      if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+      const targetVersion = pending[pending.length - 1].version;
+      const backupPath = path.join(backupDir, `auto_pre_update_${Date.now()}_v${targetVersion}.db`);
+      if (fs.existsSync(currentDbPath)) {
+        fs.copyFileSync(currentDbPath, backupPath);
+        console.log(`[DB Migration] 🛡️ Automatic pre-update safety backup saved: ${backupPath}`);
+      }
+    } catch (bErr) {
+      console.warn('[DB Migration] Safety backup warning:', bErr.message);
+    }
+
+    const helpers = createMigrationHelpers(targetDb);
+    let appliedCount = 0;
+
+    for (const migration of pending) {
+      const startMs = Date.now();
+      console.log(`[DB Migration] Applying migration v${migration.version}: "${migration.name}"...`);
+
+      const runTx = targetDb.transaction(() => {
+        migration.up(helpers);
+        const elapsed = Date.now() - startMs;
+        targetDb.prepare(`
+          INSERT INTO _schema_migrations (version, name, description, execution_time_ms)
+          VALUES (?, ?, ?, ?)
+        `).run(migration.version, migration.name, migration.description || '', elapsed);
+      });
+
+      try {
+        runTx();
+        appliedCount++;
+        const elapsed = Date.now() - startMs;
+        console.log(`[DB Migration] ✅ Migration v${migration.version} ("${migration.name}") applied in ${elapsed}ms.`);
+      } catch (err) {
+        console.error(`[DB Migration] ❌ Migration v${migration.version} failed:`, err);
+        throw err;
+      }
+    }
+
+    const latestApplied = pending[pending.length - 1].version;
+    try {
+      targetDb.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('db_schema_version', ?)").run(String(latestApplied));
+      targetDb.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('last_migration_at', ?)").run(new Date().toISOString());
+    } catch {}
+
+    console.log(`[DB Migration] 🎉 Successfully applied ${appliedCount} migration(s). Current schema version: v${latestApplied}`);
+    return { applied: appliedCount, currentVersion: latestApplied };
   }
 
-
-  // Sales module table migrations
-  const salesTableMigrations = [
-    `CREATE TABLE IF NOT EXISTS ventes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sale_number TEXT UNIQUE NOT NULL,
-      client_id INTEGER,
-      client_name TEXT NOT NULL DEFAULT 'Client Anonyme',
-      user_id INTEGER NOT NULL,
-      user_name TEXT NOT NULL,
-      caisse_id INTEGER,
-      subtotal REAL NOT NULL DEFAULT 0,
-      discount_amount REAL NOT NULL DEFAULT 0,
-      total_amount REAL NOT NULL DEFAULT 0,
-      total_cost REAL NOT NULL DEFAULT 0,
-      gross_profit REAL NOT NULL DEFAULT 0,
-      cash_received REAL NOT NULL DEFAULT 0,
-      change_returned REAL NOT NULL DEFAULT 0,
-      credit_amount REAL NOT NULL DEFAULT 0,
-      payment_status TEXT NOT NULL DEFAULT 'paye',
-      sale_status TEXT NOT NULL DEFAULT 'completed',
-      notes TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE SET NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
-      FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE SET NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS vente_lignes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      vente_id INTEGER NOT NULL,
-      product_id INTEGER,
-      product_name TEXT NOT NULL,
-      unit_name TEXT NOT NULL DEFAULT 'piece',
-      quantity REAL NOT NULL,
-      conversion_factor REAL NOT NULL DEFAULT 1,
-      cost_price_snapshot REAL NOT NULL DEFAULT 0,
-      selling_price_snapshot REAL NOT NULL DEFAULT 0,
-      discount_percent REAL NOT NULL DEFAULT 0,
-      line_total REAL NOT NULL DEFAULT 0,
-      line_profit REAL NOT NULL DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (vente_id) REFERENCES ventes(id) ON DELETE CASCADE,
-      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE SET NULL
-    )`,
-    `CREATE TABLE IF NOT EXISTS vente_paiements (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      vente_id INTEGER NOT NULL,
-      client_id INTEGER,
-      amount REAL NOT NULL,
-      payment_date TEXT NOT NULL,
-      user_id INTEGER,
-      user_name TEXT,
-      notes TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (vente_id) REFERENCES ventes(id) ON DELETE CASCADE,
-      FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE SET NULL
-    )`,
-    `CREATE INDEX IF NOT EXISTS idx_ventes_date ON ventes(created_at)`,
-    `CREATE INDEX IF NOT EXISTS idx_ventes_client ON ventes(client_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_ventes_user ON ventes(user_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_ventes_status ON ventes(payment_status)`,
-    `CREATE INDEX IF NOT EXISTS idx_ventes_sale_number ON ventes(sale_number)`,
-    `CREATE INDEX IF NOT EXISTS idx_vente_lignes_vente ON vente_lignes(vente_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_vente_lignes_product ON vente_lignes(product_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_vente_paiements_vente ON vente_paiements(vente_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_vente_paiements_client ON vente_paiements(client_id)`
-  ];
-  for (const tSql of salesTableMigrations) {
-    try { db.exec(tSql); } catch (e) { if (!e.message.includes('already exists')) console.warn('[DB] Sales migration:', e.message); }
-  }
-
-  // Precomputed Summary Tables for High-Performance Statistics
-  const statsTableMigrations = [
-    `CREATE TABLE IF NOT EXISTS stats_daily_sales (
-      date TEXT PRIMARY KEY,
-      sales_count INTEGER DEFAULT 0,
-      completed_count INTEGER DEFAULT 0,
-      subtotal REAL DEFAULT 0,
-      discount_amount REAL DEFAULT 0,
-      total_revenue REAL DEFAULT 0,
-      total_cogs REAL DEFAULT 0,
-      gross_profit REAL DEFAULT 0,
-      cash_received REAL DEFAULT 0,
-      credit_amount REAL DEFAULT 0,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`,
-    `CREATE TABLE IF NOT EXISTS stats_daily_products (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
-      product_id INTEGER NOT NULL,
-      product_name TEXT NOT NULL,
-      category_id INTEGER,
-      quantity_sold REAL DEFAULT 0,
-      revenue REAL DEFAULT 0,
-      cogs REAL DEFAULT 0,
-      gross_profit REAL DEFAULT 0,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(date, product_id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS stats_daily_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
-      user_id INTEGER NOT NULL,
-      user_name TEXT NOT NULL,
-      sales_count INTEGER DEFAULT 0,
-      revenue REAL DEFAULT 0,
-      gross_profit REAL DEFAULT 0,
-      cash_collected REAL DEFAULT 0,
-      credit_issued REAL DEFAULT 0,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(date, user_id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS stats_daily_caisses (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
-      caisse_id INTEGER NOT NULL,
-      total_in REAL DEFAULT 0,
-      total_out REAL DEFAULT 0,
-      net_change REAL DEFAULT 0,
-      transaction_count INTEGER DEFAULT 0,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(date, caisse_id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS stats_daily_credits (
-      date TEXT PRIMARY KEY,
-      credit_issued REAL DEFAULT 0,
-      credit_repaid REAL DEFAULT 0,
-      new_debts_count INTEGER DEFAULT 0,
-      payments_count INTEGER DEFAULT 0,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`,
-    `CREATE TABLE IF NOT EXISTS stats_daily_employees (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT NOT NULL,
-      employee_id INTEGER NOT NULL,
-      total_advances REAL DEFAULT 0,
-      total_salaries REAL DEFAULT 0,
-      total_paid REAL DEFAULT 0,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(date, employee_id)
-    )`,
-    `CREATE TABLE IF NOT EXISTS stats_inventory_summary (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      total_items_count INTEGER DEFAULT 0,
-      total_units_stock REAL DEFAULT 0,
-      total_inventory_valuation_cost REAL DEFAULT 0,
-      total_inventory_valuation_selling REAL DEFAULT 0,
-      potential_margin REAL DEFAULT 0,
-      low_stock_count INTEGER DEFAULT 0,
-      out_of_stock_count INTEGER DEFAULT 0,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`,
-    `CREATE TABLE IF NOT EXISTS stats_reconciliation_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      reconciled_by TEXT NOT NULL,
-      date_from TEXT,
-      date_to TEXT,
-      status TEXT NOT NULL DEFAULT 'completed',
-      discrepancies_found INTEGER DEFAULT 0,
-      details TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_sales_date ON stats_daily_sales(date)`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_prod_date ON stats_daily_products(date)`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_prod_pid ON stats_daily_products(product_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_prod_cat ON stats_daily_products(category_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_user_date ON stats_daily_users(date)`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_user_uid ON stats_daily_users(user_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_caisse_date ON stats_daily_caisses(date)`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_caisse_cid ON stats_daily_caisses(caisse_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_credit_date ON stats_daily_credits(date)`,
-    `CREATE INDEX IF NOT EXISTS idx_stats_emp_date ON stats_daily_employees(date)`
-  ];
-  for (const sSql of statsTableMigrations) {
-    try { db.exec(sSql); } catch (e) { if (!e.message.includes('already exists')) console.warn('[DB] Stats migration:', e.message); }
-  }
-
-  // Migrate indexes that depend on migrated columns
-  const indexMigrations = [
-    `CREATE INDEX IF NOT EXISTS idx_products_caisse ON products(caisse_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_products_supplier ON products(primary_supplier_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_cart_orders_caisse ON cart_orders(caisse_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_cart_orders_user ON cart_orders(user_name)`,
-    `CREATE INDEX IF NOT EXISTS idx_caisse_transactions_session ON caisse_transactions(session_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_caisse_transactions_category ON caisse_transactions(category_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_caisse_sessions_caisse ON caisse_sessions(caisse_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_caisse_sessions_status ON caisse_sessions(status)`,
-    `CREATE INDEX IF NOT EXISTS idx_caisses_status ON caisses(status)`,
-    `CREATE INDEX IF NOT EXISTS idx_caisses_default ON caisses(is_default)`,
-    `CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name)`,
-    `CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone)`,
-    `CREATE INDEX IF NOT EXISTS idx_client_debts_client ON client_debts(client_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_client_debts_product ON client_debts(product_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_client_debts_status ON client_debts(status)`,
-    `CREATE INDEX IF NOT EXISTS idx_client_debts_date ON client_debts(date)`,
-    `CREATE INDEX IF NOT EXISTS idx_client_payments_client ON client_payments(client_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_client_payments_date ON client_payments(date)`
-  ];
-  for (const idx of indexMigrations) {
-    try { db.exec(idx); } catch (e) { console.warn('[DB] Index migration warning:', e.message); }
-  }
+  // Execute migrations pipeline
+  runDatabaseMigrations(db, dbPath, dbDir);
 
   // ==========================================
   // INITIAL SEEDS (Clean First Run Setup)

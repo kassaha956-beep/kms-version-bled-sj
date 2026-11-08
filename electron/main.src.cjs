@@ -83,6 +83,25 @@ function createWindow() {
 app.whenReady().then(() => {
   const userDataPath = app.getPath('userData');
   db = initDatabase(userDataPath);
+
+  // Automatic software version upgrade tracking
+  try {
+    const currentAppVersion = app.getVersion();
+    const prevVersionRow = db.prepare("SELECT value FROM app_settings WHERE key = 'installed_software_version'").get();
+    const prevVersion = prevVersionRow ? prevVersionRow.value : null;
+
+    if (!prevVersion) {
+      db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('installed_software_version', ?)").run(currentAppVersion);
+    } else if (prevVersion !== currentAppVersion) {
+      console.log(`[App Update] ✨ Software updated in-place: v${prevVersion} → v${currentAppVersion}`);
+      db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('installed_software_version', ?)").run(currentAppVersion);
+      db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('last_upgrade_timestamp', ?)").run(new Date().toISOString());
+      db.prepare("INSERT INTO audit_logs (user, action) VALUES (?, ?)").run('System', `Mise à jour logicielle: v${prevVersion} → v${currentAppVersion}`);
+    }
+  } catch (verErr) {
+    console.warn('[App Update] Notice version check:', verErr.message);
+  }
+
   setupIpcHandlers();
   createWindow();
 
@@ -99,6 +118,17 @@ app.on('window-all-closed', () => {
 
 function setupIpcHandlers() {
   ipcMain.handle('app:version', () => app.getVersion());
+  ipcMain.handle('app:getUpdateInfo', () => {
+    try {
+      const v = app.getVersion();
+      const dbVer = db.prepare("SELECT MAX(version) as max_v FROM _schema_migrations").get()?.max_v || 1;
+      const lastUpgrade = db.prepare("SELECT value FROM app_settings WHERE key = 'last_upgrade_timestamp'").get()?.value || null;
+      const migrations = db.prepare("SELECT * FROM _schema_migrations ORDER BY version ASC").all();
+      return { success: true, version: v, schemaVersion: dbVer, lastUpgrade, migrations };
+    } catch (err) {
+      return { success: false, version: app.getVersion(), error: err.message };
+    }
+  });
 
   // Dominosoft Software Activation & Mode Démo Status
   ipcMain.handle('activation:checkStatus', async () => {

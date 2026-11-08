@@ -48,9 +48,11 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "imatechx"
+      "shortcutName": "imatechx",
+      "differentialPackage": true
     }
   },
   "devDependencies": {

@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // App info
   getAppVersion: () => ipcRenderer.invoke('app:version'),
+  getUpdateInfo: () => ipcRenderer.invoke('app:getUpdateInfo'),
 
   // Settings
   getSettings: () => ipcRenderer.invoke('settings:getAll'),
