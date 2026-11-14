@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Settings, 
   Package, Plus, Search, Edit2, Trash2, ShoppingCart, 
-  CheckCircle2, AlertTriangle, 
+  CheckCircle2, AlertTriangle, AlertCircle, Calendar,
   X, RefreshCw, Building2, Tag,
   Scale, BarChart2, History, FileText, Eye, Star
 } from 'lucide-react';
@@ -59,6 +59,7 @@ export interface Product {
   status: 'active' | 'inactive';
   is_favorite?: number;
   notes?: string;
+  date_expiration?: string;
   caisse_id?: number;
   caisse_name?: string;
   units?: ProductUnit[];
@@ -127,6 +128,83 @@ export const isCigaretteProduct = (product: Product): boolean => {
   }
 
   return false;
+};
+
+export interface ExpirationStatusInfo {
+  tier: 'expired' | 'less_1m' | 'less_2m' | 'less_3m' | 'safe';
+  daysRemaining: number;
+  label: string;
+  badgeLabel: string;
+  color: string;
+  bg: string;
+  border: string;
+}
+
+export const getExpirationStatusInfo = (dateStr?: string | null): ExpirationStatusInfo | null => {
+  if (!dateStr || !dateStr.trim()) return null;
+  const parts = dateStr.trim().split('-');
+  let exp: Date;
+  if (parts.length === 3) {
+    exp = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+  } else {
+    exp = new Date(dateStr);
+  }
+  exp.setHours(0, 0, 0, 0);
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const diffDays = Math.ceil((exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+  if (diffDays <= 0) {
+    return {
+      tier: 'expired',
+      daysRemaining: diffDays,
+      label: diffDays === 0 ? "Expire aujourd'hui !" : `Périmé depuis ${Math.abs(diffDays)} jour${Math.abs(diffDays) > 1 ? 's' : ''}`,
+      badgeLabel: 'Périmé',
+      color: '#dc2626',
+      bg: '#fef2f2',
+      border: '#fecaca'
+    };
+  } else if (diffDays <= 30) {
+    return {
+      tier: 'less_1m',
+      daysRemaining: diffDays,
+      label: `Expire dans ${diffDays} jour${diffDays > 1 ? 's' : ''} (< 1 mois)`,
+      badgeLabel: `< 1 mois (${diffDays}j)`,
+      color: '#ef4444',
+      bg: '#fff1f2',
+      border: '#fecdd3'
+    };
+  } else if (diffDays <= 60) {
+    return {
+      tier: 'less_2m',
+      daysRemaining: diffDays,
+      label: `Expire dans ${diffDays} jours (< 2 mois)`,
+      badgeLabel: `< 2 mois (${diffDays}j)`,
+      color: '#f97316',
+      bg: '#fff7ed',
+      border: '#fed7aa'
+    };
+  } else if (diffDays <= 90) {
+    return {
+      tier: 'less_3m',
+      daysRemaining: diffDays,
+      label: `Expire dans ${diffDays} jours (< 3 mois)`,
+      badgeLabel: `< 3 mois (${diffDays}j)`,
+      color: '#eab308',
+      bg: '#fefce8',
+      border: '#fef08a'
+    };
+  } else {
+    return {
+      tier: 'safe',
+      daysRemaining: diffDays,
+      label: `Valide (dans ${diffDays} jours)`,
+      badgeLabel: `Exp: ${dateStr}`,
+      color: '#16a34a',
+      bg: '#f0fdf4',
+      border: '#bbf7d0'
+    };
+  }
 };
 
 /**
@@ -244,6 +322,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
   const [selectedCategory, setSelectedCategory] = useState<number | 'all'>('all');
   const [selectedSupplier, setSelectedSupplier] = useState<number | 'all'>('all');
   const [stockStatus, setStockStatus] = useState<'all' | 'in_stock' | 'low_stock' | 'out_of_stock'>('all');
+  const [expirationFilter, setExpirationFilter] = useState<'all' | 'all_alerts' | 'expired' | 'less_1m' | 'less_2m' | 'less_3m'>('all');
   const [onlyFavorites, setOnlyFavorites] = useState<boolean>(false);
   const [minPrice, setMinPrice] = useState<string>('');
   const [maxPrice, setMaxPrice] = useState<string>('');
@@ -328,6 +407,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
     status: 'active' | 'inactive';
     is_favorite: number;
     notes: string;
+    date_expiration: string;
     units: ProductUnit[];
     supplier_prices: ProductSupplierPrice[];
   }>({
@@ -345,6 +425,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
     status: 'active',
     is_favorite: 0,
     notes: '',
+    date_expiration: '',
     units: [
       { unit_name: 'Pièce (x1)', conversion_factor: 1, selling_price: 0, is_default: 1 }
     ],
@@ -653,6 +734,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
           categoryId: selectedCategory,
           supplierId: selectedSupplier,
           stockStatus,
+          expirationStatus: expirationFilter !== 'all' ? expirationFilter : undefined,
           isFavorite: onlyFavorites ? 1 : undefined,
           minPrice: minPrice !== '' ? parseFloat(minPrice) : undefined,
           maxPrice: maxPrice !== '' ? parseFloat(maxPrice) : undefined,
@@ -931,7 +1013,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
 
   useEffect(() => {
     fetchProducts();
-  }, [search, selectedCategory, selectedSupplier, stockStatus, onlyFavorites, minPrice, maxPrice, sortBy, page, pageSize]);
+  }, [search, selectedCategory, selectedSupplier, stockStatus, expirationFilter, onlyFavorites, minPrice, maxPrice, sortBy, page, pageSize]);
 
   // Auto-sync cart items with catalog to guarantee strictly wholesale purchase prices
   // (Fixes any legacy cart items saved at retail selling price)
@@ -1338,7 +1420,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
   }, [isCartOpen, processAchatBarcode]);
 
   // Open Product Modal (Create or Edit)
-  const handleOpenProductModal = (product?: Product) => {
+  const handleOpenProductModal = async (product?: Product) => {
     if (!isAdmin) {
       setAlert({ type: 'error', message: t.adminOnlyNotice });
       return;
@@ -1388,6 +1470,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
         status: product.status || 'active',
         is_favorite: product.is_favorite ? 1 : 0,
         notes: product.notes || '',
+        date_expiration: product.date_expiration || '',
         units: product.units && product.units.length > 0 ? [...product.units] : [
           { unit_name: product.base_unit, conversion_factor: 1, selling_price: product.selling_price, is_default: 1 }
         ],
@@ -1414,7 +1497,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
 
       setProductForm({
         name: '',
-        sku: 'SKU-' + Math.floor(1000 + Math.random() * 9000),
+        sku: (await window.electronAPI?.getNextSku?.())?.sku || ('SKU-' + Date.now()),
         barcode: '',
         category_id: defaultCatId,
         primary_supplier_id: suppliers[0]?.id || 0,
@@ -1427,6 +1510,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
         status: 'active',
         is_favorite: 0,
         notes: '',
+        date_expiration: '',
         units: [
           { unit_name: isCig ? 'Tige (x1)' : 'Pièce (x1)', conversion_factor: 1, selling_price: 0, is_default: 1 }
         ],
@@ -2093,6 +2177,32 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
             />
           </div>
 
+          {/* Expiration Dropdown Filter */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>Péremption:</span>
+            <select
+              value={expirationFilter}
+              onChange={e => { setExpirationFilter(e.target.value as any); setPage(1); }}
+              className="input-clean"
+              style={{
+                fontSize: '11px',
+                padding: '5px 10px',
+                width: 'auto',
+                fontWeight: expirationFilter !== 'all' ? 700 : 500,
+                color: expirationFilter === 'expired' ? '#dc2626' : expirationFilter === 'less_1m' ? '#ef4444' : expirationFilter === 'less_2m' ? '#ea580c' : expirationFilter === 'less_3m' ? '#ca8a04' : '#334155',
+                borderColor: expirationFilter !== 'all' ? '#cbd5e1' : '#e2e8f0',
+                background: expirationFilter === 'expired' ? '#fef2f2' : expirationFilter === 'less_1m' ? '#fff1f2' : expirationFilter === 'less_2m' ? '#fff7ed' : expirationFilter === 'less_3m' ? '#fefce8' : '#ffffff'
+              }}
+            >
+              <option value="all">Toutes les dates</option>
+              <option value="all_alerts">⚠️ Alertes (≤ 3 mois)</option>
+              <option value="expired">🔴 Déjà Périmés</option>
+              <option value="less_1m">🔴 Moins d'un mois (&lt; 30j)</option>
+              <option value="less_2m">🟠 Moins de 2 mois (30-60j)</option>
+              <option value="less_3m">🟡 Moins de 3 mois (60-90j)</option>
+            </select>
+          </div>
+
           {/* Sort By */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: 'auto' }}>
             <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>{t.sortBy}</span>
@@ -2108,6 +2218,7 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
               <option value="price_desc">{t.sortPriceExp}</option>
               <option value="stock_asc">{t.sortStockAsc}</option>
               <option value="stock_desc">{t.sortStockDesc}</option>
+              <option value="expiration_asc">📅 Date péremption (urgents)</option>
             </select>
           </div>
         </div>
@@ -2248,6 +2359,30 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                                 #{product.barcode}
                               </span>
                             )}
+                            {product.date_expiration && (() => {
+                              const expStatus = getExpirationStatusInfo(product.date_expiration);
+                              if (!expStatus) return null;
+                              return (
+                                <span
+                                  style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    fontSize: '10px',
+                                    fontWeight: 700,
+                                    padding: '1px 6px',
+                                    borderRadius: '4px',
+                                    background: expStatus.bg,
+                                    color: expStatus.color,
+                                    border: `1px solid ${expStatus.border}`
+                                  }}
+                                  title={expStatus.label}
+                                >
+                                  <Calendar size={10} color={expStatus.color} />
+                                  <span>{expStatus.badgeLabel}</span>
+                                </span>
+                              );
+                            })()}
                           </div>
                         </div>
                       </td>
@@ -3278,8 +3413,19 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                 {/* SKU, Barcode, Category & Supplier */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
                   <div>
-                    <label style={{ fontSize: '12px', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '4px' }}>
-                      SKU / Code *
+                    <label style={{ fontSize: '12px', fontWeight: 600, color: '#334155', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                      <span>SKU / Code *</span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const res = await window.electronAPI?.getNextSku?.();
+                          if (res?.sku) setProductForm(prev => ({ ...prev, sku: res.sku }));
+                        }}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: '#16a34a', fontWeight: 600, padding: 0 }}
+                        title="Générer un code SKU unique"
+                      >
+                        ⚡ Nouveau
+                      </button>
                     </label>
                     <input
                       type="text"
@@ -3405,6 +3551,74 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                       {productForm.is_favorite ? '⭐ Favori Actif' : 'Non favori'}
                     </span>
                   </label>
+                </div>
+
+                {/* Date d'expiration & Péremption */}
+                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px 14px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Calendar size={16} color="#64748b" />
+                      <span style={{ fontSize: '13px', fontWeight: 700, color: '#1e293b' }}>
+                        Date d'expiration / Péremption
+                      </span>
+                      <span style={{ fontSize: '11px', color: '#64748b' }}>(Optionnel)</span>
+                    </div>
+                    {productForm.date_expiration && (
+                      <button
+                        type="button"
+                        onClick={() => setProductForm({ ...productForm, date_expiration: '' })}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: '#dc2626',
+                          fontSize: '11px',
+                          cursor: 'pointer',
+                          fontWeight: 600,
+                          padding: '2px 6px'
+                        }}
+                      >
+                        Effacer la date
+                      </button>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <input
+                      type="date"
+                      className="input-clean"
+                      value={productForm.date_expiration || ''}
+                      onChange={e => setProductForm({ ...productForm, date_expiration: e.target.value })}
+                      style={{ fontSize: '12px', padding: '7px 10px', flex: 1 }}
+                    />
+                  </div>
+
+                  {/* Dynamic Status Preview Badge */}
+                  {productForm.date_expiration ? (() => {
+                    const status = getExpirationStatusInfo(productForm.date_expiration);
+                    if (!status) return null;
+                    return (
+                      <div style={{
+                        marginTop: '8px',
+                        padding: '6px 10px',
+                        borderRadius: '6px',
+                        background: status.bg,
+                        border: `1px solid ${status.border}`,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        color: status.color
+                      }}>
+                        <AlertCircle size={14} color={status.color} />
+                        <span>{status.label}</span>
+                      </div>
+                    );
+                  })() : (
+                    <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>
+                      Alertes automatiques dans la barre latérale dès 3 mois, 2 mois, 1 mois et périmé.
+                    </div>
+                  )}
                 </div>
 
                 {/* ======================================================== */}

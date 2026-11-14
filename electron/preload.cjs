@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // KMS Products, Units & Supplier Comparisons
   getProducts: (filters) => ipcRenderer.invoke('products:getAll', filters),
+  getNextSku: () => ipcRenderer.invoke('products:nextSku'),
   getProductsForPOS: () => ipcRenderer.invoke('products:getForPOS'),
   getProductById: (id) => ipcRenderer.invoke('products:getById', id),
   createProduct: (data) => ipcRenderer.invoke('products:create', data),
@@ -60,6 +61,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toggleProductFavorite: (id) => ipcRenderer.invoke('products:toggleFavorite', id),
   updateProductStock: (data) => ipcRenderer.invoke('products:updateStock', data),
   getSupplierComparison: (id) => ipcRenderer.invoke('products:getSupplierComparison', id),
+  getExpirationAlerts: () => ipcRenderer.invoke('products:getExpirationAlerts'),
   getCategories: () => ipcRenderer.invoke('categories:getAll'),
   createCategory: (data) => ipcRenderer.invoke('categories:create', data),
   updateCategory: (data) => ipcRenderer.invoke('categories:update', data),
@@ -79,13 +81,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateEmployee: (data) => ipcRenderer.invoke('employees:update', data),
   deleteEmployee: (id) => ipcRenderer.invoke('employees:delete', id),
   addEmployeeAdvance: (data) => ipcRenderer.invoke('employees:addAdvance', data),
+  repayEmployeeAdvance: (data) => ipcRenderer.invoke('employees:repayAdvance', data),
   deleteEmployeeAdvance: (id) => ipcRenderer.invoke('employees:deleteAdvance', id),
   paySalary: (data) => ipcRenderer.invoke('employees:paySalary', data),
   deleteEmployeePayment: (id) => ipcRenderer.invoke('employees:deletePayment', id),
   addEmployeeDebt: (data) => ipcRenderer.invoke('employees:addDebt', data),
+  repayEmployeeDebt: (data) => ipcRenderer.invoke('employees:repayDebt', data),
   deleteEmployeeDebt: (id) => ipcRenderer.invoke('employees:deleteDebt', id),
   getEmployeeKpis: (filters) => ipcRenderer.invoke('employees:getKpis', filters),
   getEmployeeDepartments: () => ipcRenderer.invoke('employees:getDepartments'),
+  updateEmployeeSalary: (data) => ipcRenderer.invoke('employees:updateSalary', data),
+  getEmployeeAttendance: (params) => ipcRenderer.invoke('employees:getAttendance', params),
+  saveEmployeeAttendance: (data) => ipcRenderer.invoke('employees:saveAttendance', data),
+  bulkSaveEmployeeAttendance: (data) => ipcRenderer.invoke('employees:bulkSaveAttendance', data),
+  deleteEmployeeAttendance: (data) => ipcRenderer.invoke('employees:deleteAttendance', data),
 
   // Multi-Caisse & Trésorerie
   getCaisses: (params) => ipcRenderer.invoke('caisses:getAll', params),

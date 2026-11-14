@@ -736,6 +736,121 @@ export interface Translations {
   fullDebtSettledBanner: string;
   partialDebtSettledBanner: string;
   validateSettlementBtn: string;
+
+  // Expirations & Péremption (v3.3.3)
+  expirationPageTitle: string;
+  expirationPageSubtitle: string;
+  expirationUpdateBadge: string;
+  expirationCatalogueBtn: string;
+  expirationRefreshBtn: string;
+  expirationCardExpired: string;
+  expirationCardExpiredZero: string;
+  expirationCardExpiredAlert: string;
+  expirationCardLess1m: string;
+  expirationCardLess1mSub: string;
+  expirationCardLess2m: string;
+  expirationCardLess2mSub: string;
+  expirationCardLess3m: string;
+  expirationCardLess3mSub: string;
+  expirationTabAll: string;
+  expirationTabExpired: string;
+  expirationTabLess1m: string;
+  expirationTabLess2m: string;
+  expirationTabLess3m: string;
+  expirationAllCategories: string;
+  expirationSearchPlaceholder: string;
+  expirationColArticle: string;
+  expirationColStock: string;
+  expirationColDate: string;
+  expirationColStatus: string;
+  expirationColActions: string;
+  expirationEmptySearch: string;
+  expirationEmptyTier: string;
+  expirationEmptyExpiredMsg: string;
+  expirationEmptyAllMsg: string;
+  expirationSupplier: string;
+  expirationPieces: string;
+  expirationExpiresToday: string;
+  expirationExpiredSinceDays: string;
+  expirationInDaysLess1m: string;
+  expirationInDaysLess2m: string;
+  expirationInDaysLess3m: string;
+  expirationBtnDate: string;
+  expirationBtnProductCard: string;
+  expirationFooterCount: string;
+  expirationFooterOf: string;
+  expirationFooterAlerts: string;
+  expirationColorCode: string;
+  expirationColorExpired: string;
+  expirationColorLess1m: string;
+  expirationColorLess2m: string;
+  expirationColorLess3m: string;
+  expirationModalTitle: string;
+  expirationModalProduct: string;
+  expirationModalNewDate: string;
+  expirationModalClearDate: string;
+  expirationModalCancel: string;
+  expirationModalSave: string;
+  expirationSidebarBtn: string;
+
+  // Employee Attendance & Salary (v3.4.0)
+  empTabPayroll: string;
+  empTabAttendance: string;
+  attPresent: string;
+  attHalfDay: string;
+  attAbsent: string;
+  attLeave: string;
+  attRest: string;
+  attNone: string;
+  attMarkAllPresent: string;
+  attMarkSundaysRest: string;
+  attClearMonth: string;
+  attSelectEmployee: string;
+  attWorkDaysTotal: string;
+  attAbsencesTotal: string;
+  attHalfDaysTotal: string;
+  attRestDaysTotal: string;
+  attEstMonthlySalary: string;
+  attPayBasedOnAttendance: string;
+  attDayNotePlaceholder: string;
+  attClickToChange: string;
+  empDefineSalaryTitle: string;
+  empBaseSalaryLabel: string;
+  empDailyRateLabel: string;
+  empCalcDailyRateAuto: string;
+  empSalarySavedSuccess: string;
+  empAttendanceSavedSuccess: string;
+  empEditSalaryBtn: string;
+  empDayMon: string;
+  empDayTue: string;
+  empDayWed: string;
+  empDayThu: string;
+  empDayFri: string;
+  empDaySat: string;
+  empDaySun: string;
+  empDailySalaryRate: string;
+  empWorkingDaysBasis: string;
+  empMonthDaysLegend: string;
+  empQuickStatusPrompt: string;
+  empSearchEmpPlaceholder: string;
+  empAllDepartments: string;
+  empSelectCaisse: string;
+  empNoCaisseAffect: string;
+  empRepayDebtTitle: string;
+  empRepayAdvTitle: string;
+  empBtnRepay: string;
+  empBtnRefundAdv: string;
+  empRepayAmount: string;
+  empRepayCaisse: string;
+  empToastRepaySaved: string;
+  empToastAdvRefunded: string;
+  empQuickPointageToday: string;
+  empPointedStatus: string;
+  empNotPointed: string;
+  empMarkPresent1j: string;
+  empMarkHalfDay: string;
+  empMarkAbsent: string;
+  empSelfPointageBadge: string;
 }
 
 export const translations: Record<Language, Translations> = {
@@ -1466,7 +1581,122 @@ export const translations: Record<Language, Translations> = {
     notesRef: "Remarques / Référence",
     fullDebtSettledBanner: "Ce versement solde intégralement la dette du client (Solde restant : 0.00 DA).",
     partialDebtSettledBanner: "Règlement partiel : Reste dû",
-    validateSettlementBtn: "Encaisser et Valider le Règlement"
+        validateSettlementBtn: "Encaisser et Valider le Règlement",
+
+    // Expirations & Péremption (v3.3.3)
+    expirationPageTitle: "Gestion des Dates d'Expiration & Péremption",
+    expirationPageSubtitle: "Alertes automatiques dès 3 mois (Jaune), 2 mois (Orange), 1 mois (Rouge) et produits déjà périmés (Rouge foncé)",
+    expirationUpdateBadge: "Mise à jour v3.3.3",
+    expirationCatalogueBtn: "Catalogue Produits",
+    expirationRefreshBtn: "Actualiser",
+    expirationCardExpired: "Déjà Périmés",
+    expirationCardExpiredZero: "Aucun produit périmé",
+    expirationCardExpiredAlert: "À retirer immédiatement des rayons",
+    expirationCardLess1m: "< 1 Mois (Critique)",
+    expirationCardLess1mSub: "Échéance sous 30 jours (Rouge)",
+    expirationCardLess2m: "< 2 Mois (Attention)",
+    expirationCardLess2mSub: "Échéance entre 31 et 60 jours (Orange)",
+    expirationCardLess3m: "< 3 Mois (À surveiller)",
+    expirationCardLess3mSub: "Échéance entre 61 et 90 jours (Jaune)",
+    expirationTabAll: "Toutes les alertes",
+    expirationTabExpired: "Périmés",
+    expirationTabLess1m: "< 1 mois",
+    expirationTabLess2m: "< 2 mois",
+    expirationTabLess3m: "< 3 mois",
+    expirationAllCategories: "Toutes catégories",
+    expirationSearchPlaceholder: "Rechercher article, SKU, code-barres...",
+    expirationColArticle: "Article & Référence",
+    expirationColStock: "Stock Disponible",
+    expirationColDate: "Date d'Expiration",
+    expirationColStatus: "Statut & Urgence",
+    expirationColActions: "Actions",
+    expirationEmptySearch: "Aucun produit ne correspond à votre recherche",
+    expirationEmptyTier: "Aucun produit dans ce niveau d'alerte",
+    expirationEmptyExpiredMsg: "Excellente nouvelle ! Aucun produit périmé dans votre catalogue.",
+    expirationEmptyAllMsg: "Tous vos produits périssables disposent de dates conformes.",
+    expirationSupplier: "Fournisseur :",
+    expirationPieces: "pièce(s)",
+    expirationExpiresToday: "Expire aujourd'hui",
+    expirationExpiredSinceDays: "Périmé depuis",
+    expirationInDaysLess1m: "Dans",
+    expirationInDaysLess2m: "Dans",
+    expirationInDaysLess3m: "Dans",
+    expirationBtnDate: "Date",
+    expirationBtnProductCard: "Fiche",
+    expirationFooterCount: "Affichage de",
+    expirationFooterOf: "produit(s) sur",
+    expirationFooterAlerts: "en alerte de péremption.",
+    expirationColorCode: "Code couleur :",
+    expirationColorExpired: "Périmé",
+    expirationColorLess1m: "<1 mois (Rouge)",
+    expirationColorLess2m: "<2 mois (Orange)",
+    expirationColorLess3m: "<3 mois (Jaune)",
+    expirationModalTitle: "Modifier la date d'expiration",
+    expirationModalProduct: "Produit :",
+    expirationModalNewDate: "Nouvelle Date d'Expiration",
+    expirationModalClearDate: "Effacer la date (non périssable)",
+    expirationModalCancel: "Annuler",
+    expirationModalSave: "Enregistrer",
+    expirationSidebarBtn: "Péremption",
+
+    // Employee Attendance & Salary (v3.4.0)
+    empTabPayroll: "Fiches de Paie & Règlements",
+    empTabAttendance: "Pointage & Calendrier de Présence",
+    attPresent: "Journée complète",
+    attHalfDay: "Demi-journée",
+    attAbsent: "Absent",
+    attLeave: "Congé payé",
+    attRest: "Repos",
+    attNone: "Non pointé",
+    attMarkAllPresent: "Pointer tout le mois (Présent Lun-Sam)",
+    attMarkSundaysRest: "Marquer les dimanches comme Repos",
+    attClearMonth: "Réinitialiser le mois",
+    attSelectEmployee: "Sélectionnez un employé pour gérer son calendrier et son pointage",
+    attWorkDaysTotal: "Jours travaillés",
+    attAbsencesTotal: "Absences",
+    attHalfDaysTotal: "Demi-journées",
+    attRestDaysTotal: "Jours de repos",
+    attEstMonthlySalary: "Salaire calculé",
+    attPayBasedOnAttendance: "Régler selon le pointage",
+    attDayNotePlaceholder: "Motif ou note (ex: retard 1h, mission...)",
+    attClickToChange: "Cliquer pour modifier le statut",
+    empDefineSalaryTitle: "Définir / Modifier le Salaire",
+    empBaseSalaryLabel: "Salaire de Base Mensuel (DA)",
+    empDailyRateLabel: "Taux Journalier (DA / jour)",
+    empCalcDailyRateAuto: "Calcul automatique standard (Salaire / 30 jours)",
+    empSalarySavedSuccess: "Salaire de l'employé enregistré avec succès.",
+    empAttendanceSavedSuccess: "Pointage mis à jour avec succès.",
+    empEditSalaryBtn: "Définir Salaire",
+    empDayMon: "Lun",
+    empDayTue: "Mar",
+    empDayWed: "Mer",
+    empDayThu: "Jeu",
+    empDayFri: "Ven",
+    empDaySat: "Sam",
+    empDaySun: "Dim",
+    empDailySalaryRate: "Taux / jour",
+    empWorkingDaysBasis: "Base 30 jours",
+    empMonthDaysLegend: "Légende des statuts :",
+    empQuickStatusPrompt: "Changer l'état de la journée :",
+    empSearchEmpPlaceholder: "Rechercher employé...",
+    empAllDepartments: "Tous les services",
+    empSelectCaisse: "Caisse de règlement (optionnel)",
+    empNoCaisseAffect: "-- Sans décaissement / encaissement --",
+    empRepayDebtTitle: "Remboursement de dette employé",
+    empRepayAdvTitle: "Restitution d'avance sur salaire",
+    empBtnRepay: "Rembourser",
+    empBtnRefundAdv: "Restituer",
+    empRepayAmount: "Montant à rembourser (DA)",
+    empRepayCaisse: "Caisse d'encaissement",
+    empToastRepaySaved: "Remboursement enregistré avec succès",
+    empToastAdvRefunded: "Avance restituée avec succès",
+    empQuickPointageToday: "Pointage rapide d'aujourd'hui",
+    empPointedStatus: "Statut actuel :",
+    empNotPointed: "Non pointé",
+    empMarkPresent1j: "Journée Complète (1j)",
+    empMarkHalfDay: "Demi-Journée (0.5j)",
+    empMarkAbsent: "Absent (0j)",
+    empSelfPointageBadge: "Mon pointage personnel"
   },
 
   en: {
@@ -2196,7 +2426,122 @@ export const translations: Record<Language, Translations> = {
     notesRef: "Notes / Reference",
     fullDebtSettledBanner: "This payment fully settles the client's debt (Remaining balance: 0.00 DA).",
     partialDebtSettledBanner: "Partial payment: Remaining debt",
-    validateSettlementBtn: "Collect & Validate Settlement"
+        validateSettlementBtn: "Collect & Validate Settlement",
+
+    // Expirations & Shelf-life (v3.3.3)
+    expirationPageTitle: "Expiration Date & Shelf-Life Management",
+    expirationPageSubtitle: "Automatic alerts starting from 3 months (Yellow), 2 months (Orange), 1 month (Red), and expired items (Dark Red)",
+    expirationUpdateBadge: "Update v3.3.3",
+    expirationCatalogueBtn: "Product Catalog",
+    expirationRefreshBtn: "Refresh",
+    expirationCardExpired: "Already Expired",
+    expirationCardExpiredZero: "No expired products",
+    expirationCardExpiredAlert: "Remove immediately from shelves",
+    expirationCardLess1m: "< 1 Month (Critical)",
+    expirationCardLess1mSub: "Due within 30 days (Red)",
+    expirationCardLess2m: "< 2 Months (Warning)",
+    expirationCardLess2mSub: "Due between 31 and 60 days (Orange)",
+    expirationCardLess3m: "< 3 Months (Monitor)",
+    expirationCardLess3mSub: "Due between 61 and 90 days (Yellow)",
+    expirationTabAll: "All alerts",
+    expirationTabExpired: "Expired",
+    expirationTabLess1m: "< 1 month",
+    expirationTabLess2m: "< 2 months",
+    expirationTabLess3m: "< 3 months",
+    expirationAllCategories: "All categories",
+    expirationSearchPlaceholder: "Search item, SKU, barcode...",
+    expirationColArticle: "Item & Reference",
+    expirationColStock: "Available Stock",
+    expirationColDate: "Expiration Date",
+    expirationColStatus: "Status & Urgency",
+    expirationColActions: "Actions",
+    expirationEmptySearch: "No products match your search",
+    expirationEmptyTier: "No products in this alert level",
+    expirationEmptyExpiredMsg: "Great news! No expired products in your catalog.",
+    expirationEmptyAllMsg: "All your perishable products have valid expiration dates.",
+    expirationSupplier: "Supplier:",
+    expirationPieces: "piece(s)",
+    expirationExpiresToday: "Expires today",
+    expirationExpiredSinceDays: "Expired",
+    expirationInDaysLess1m: "In",
+    expirationInDaysLess2m: "In",
+    expirationInDaysLess3m: "In",
+    expirationBtnDate: "Date",
+    expirationBtnProductCard: "Details",
+    expirationFooterCount: "Showing",
+    expirationFooterOf: "product(s) out of",
+    expirationFooterAlerts: "with expiration alerts.",
+    expirationColorCode: "Color code:",
+    expirationColorExpired: "Expired",
+    expirationColorLess1m: "<1 month (Red)",
+    expirationColorLess2m: "<2 months (Orange)",
+    expirationColorLess3m: "<3 months (Yellow)",
+    expirationModalTitle: "Edit Expiration Date",
+    expirationModalProduct: "Product:",
+    expirationModalNewDate: "New Expiration Date",
+    expirationModalClearDate: "Clear date (non-perishable)",
+    expirationModalCancel: "Cancel",
+    expirationModalSave: "Save",
+    expirationSidebarBtn: "Expiration",
+
+    // Employee Attendance & Salary (v3.4.0)
+    empTabPayroll: "Payroll & Wage Settlements",
+    empTabAttendance: "Attendance & Work Calendar",
+    attPresent: "Full Day",
+    attHalfDay: "Half Day",
+    attAbsent: "Absent",
+    attLeave: "Paid Leave",
+    attRest: "Rest Day",
+    attNone: "Unmarked",
+    attMarkAllPresent: "Mark Month as Present (Mon-Sat)",
+    attMarkSundaysRest: "Mark Sundays as Rest",
+    attClearMonth: "Reset Month Records",
+    attSelectEmployee: "Select an employee to manage work calendar & attendance",
+    attWorkDaysTotal: "Worked Days",
+    attAbsencesTotal: "Absences",
+    attHalfDaysTotal: "Half Days",
+    attRestDaysTotal: "Rest Days",
+    attEstMonthlySalary: "Calculated Wage",
+    attPayBasedOnAttendance: "Pay Based on Attendance",
+    attDayNotePlaceholder: "Reason or note (e.g. 1h late, outside task...)",
+    attClickToChange: "Click to change status",
+    empDefineSalaryTitle: "Define / Edit Worker Salary",
+    empBaseSalaryLabel: "Monthly Base Salary (DA)",
+    empDailyRateLabel: "Daily Rate (DA / day)",
+    empCalcDailyRateAuto: "Automatic calculation (Salary / 30 days)",
+    empSalarySavedSuccess: "Employee salary saved successfully.",
+    empAttendanceSavedSuccess: "Attendance records updated successfully.",
+    empEditSalaryBtn: "Set Salary",
+    empDayMon: "Mon",
+    empDayTue: "Tue",
+    empDayWed: "Wed",
+    empDayThu: "Thu",
+    empDayFri: "Fri",
+    empDaySat: "Sat",
+    empDaySun: "Sun",
+    empDailySalaryRate: "Daily rate",
+    empWorkingDaysBasis: "30 days basis",
+    empMonthDaysLegend: "Status legend:",
+    empQuickStatusPrompt: "Change day status:",
+    empSearchEmpPlaceholder: "Search worker...",
+    empAllDepartments: "All departments",
+    empSelectCaisse: "Cash register (optional)",
+    empNoCaisseAffect: "-- Do not affect cash register --",
+    empRepayDebtTitle: "Worker Debt Repayment",
+    empRepayAdvTitle: "Salary Advance Refund",
+    empBtnRepay: "Repay",
+    empBtnRefundAdv: "Refund",
+    empRepayAmount: "Amount to repay (DA)",
+    empRepayCaisse: "Destination cash register",
+    empToastRepaySaved: "Repayment recorded successfully",
+    empToastAdvRefunded: "Advance refunded successfully",
+    empQuickPointageToday: "Today's Quick Attendance",
+    empPointedStatus: "Current status:",
+    empNotPointed: "Not marked",
+    empMarkPresent1j: "Full Day (1d)",
+    empMarkHalfDay: "Half Day (0.5d)",
+    empMarkAbsent: "Absent (0d)",
+    empSelfPointageBadge: "My Personal Attendance",
   },
 
   ar: {
@@ -2926,6 +3271,121 @@ export const translations: Record<Language, Translations> = {
     notesRef: "ملاحظات / مرجع",
     fullDebtSettledBanner: "هذه الدفعة تسدد كامل دين الزبون (الرصيد المتبقي: 0.00 د.ج).",
     partialDebtSettledBanner: "سداد جزئي: المتبقي",
-    validateSettlementBtn: "قبض وتأكيد السداد"
+        validateSettlementBtn: "قبض وتأكيد السداد",
+
+    // Expirations & Péremption (v3.3.3)
+    expirationPageTitle: "إدارة تواريخ انتهاء الصلاحية والتنبيهات",
+    expirationPageSubtitle: "تنبيهات تلقائية ابتداءً من 3 أشهر (أصفر)، شهرين (برتقالي)، شهر واحد (أحمر) والسلع المنتهية (أحمر داكن)",
+    expirationUpdateBadge: "تحديث v3.3.3",
+    expirationCatalogueBtn: "دليل المنتجات",
+    expirationRefreshBtn: "تحديث",
+    expirationCardExpired: "منتهية الصلاحية",
+    expirationCardExpiredZero: "لا توجد منتجات منتهية",
+    expirationCardExpiredAlert: "يجب سحبها فوراً من الرفوف",
+    expirationCardLess1m: "أقل من شهر (حرج)",
+    expirationCardLess1mSub: "تنتهي خلال 30 يوماً (أحمر)",
+    expirationCardLess2m: "أقل من شهرين (تحذير)",
+    expirationCardLess2mSub: "تنتهي بين 31 و 60 يوماً (برتقالي)",
+    expirationCardLess3m: "أقل من 3 أشهر (مراقبة)",
+    expirationCardLess3mSub: "تنتهي بين 61 و 90 يوماً (أصفر)",
+    expirationTabAll: "جميع التنبيهات",
+    expirationTabExpired: "منتهية",
+    expirationTabLess1m: "< شهر واحد",
+    expirationTabLess2m: "< شهرين",
+    expirationTabLess3m: "< 3 أشهر",
+    expirationAllCategories: "جميع الأصناف",
+    expirationSearchPlaceholder: "بحث عن سلعة، رمز، باركود...",
+    expirationColArticle: "السلعة والرمز",
+    expirationColStock: "المخزون المتوفر",
+    expirationColDate: "تاريخ انتهاء الصلاحية",
+    expirationColStatus: "الحالة ودرجة الاستعجال",
+    expirationColActions: "إجراءات",
+    expirationEmptySearch: "لا توجد منتجات مطابقة للبحث",
+    expirationEmptyTier: "لا توجد منتجات في هذا المستوى من التنبيه",
+    expirationEmptyExpiredMsg: "أخبار ممتازة ! لا توجد أي منتجات منتهية الصلاحية في المحل.",
+    expirationEmptyAllMsg: "جميع منتجاتك القابلة للتلف ذات تواريخ صالحة ومضبوطة.",
+    expirationSupplier: "المورد :",
+    expirationPieces: "قطعة",
+    expirationExpiresToday: "تنتهي اليوم",
+    expirationExpiredSinceDays: "منتهية منذ",
+    expirationInDaysLess1m: "خلال",
+    expirationInDaysLess2m: "خلال",
+    expirationInDaysLess3m: "خلال",
+    expirationBtnDate: "تاريخ",
+    expirationBtnProductCard: "بطاقة",
+    expirationFooterCount: "عرض",
+    expirationFooterOf: "منتج(ات) من أصل",
+    expirationFooterAlerts: "في حالة تنبيه لانتهاء الصلاحية.",
+    expirationColorCode: "دليل الألوان :",
+    expirationColorExpired: "منتهية",
+    expirationColorLess1m: "< شهر (أحمر)",
+    expirationColorLess2m: "< شهرين (برتقالي)",
+    expirationColorLess3m: "< 3 أشهر (أصفر)",
+    expirationModalTitle: "تعديل تاريخ انتهاء الصلاحية",
+    expirationModalProduct: "المنتج :",
+    expirationModalNewDate: "تاريخ الصلاحية الجديد",
+    expirationModalClearDate: "مسح التاريخ (سلعة غير قابلة للتلف)",
+    expirationModalCancel: "إلغاء",
+    expirationModalSave: "حفظ",
+    expirationSidebarBtn: "الصلاحية",
+
+    // Employee Attendance & Salary (v3.4.0)
+    empTabPayroll: "كشوفات الرواتب والتسديدات",
+    empTabAttendance: "تسجيل الحضور والرزنامة (البوانتاج)",
+    attPresent: "يوم كامل (حاضر)",
+    attHalfDay: "نصف يوم",
+    attAbsent: "غائب",
+    attLeave: "عطلة مدفوعة",
+    attRest: "يوم راحة",
+    attNone: "غير مسجل",
+    attMarkAllPresent: "تسجيل الشهر كاملاً كحاضر (إثنين-سبت)",
+    attMarkSundaysRest: "تعليم أيام الجمعة كراحة",
+    attClearMonth: "إعادة ضبط الشهر",
+    attSelectEmployee: "اختر عاملاً لإدارة رزنامة حضوره وبوانتاجه",
+    attWorkDaysTotal: "أيام العمل الفعلية",
+    attAbsencesTotal: "أيام الغياب",
+    attHalfDaysTotal: "أنصاف الأيام",
+    attRestDaysTotal: "أيام الراحة",
+    attEstMonthlySalary: "الراتب المستحق المحسوب",
+    attPayBasedOnAttendance: "صرف الراتب حسب البوانتاج",
+    attDayNotePlaceholder: "ملاحظة أو سبب (مثال: تأخر ساعة، مهمة خارجية...)",
+    attClickToChange: "انقر لتغيير الحالة",
+    empDefineSalaryTitle: "تحديد / تعديل الراتب",
+    empBaseSalaryLabel: "الراتب الأساسي الشهري (د.ج)",
+    empDailyRateLabel: "الأجر اليومي (د.ج / يوم)",
+    empCalcDailyRateAuto: "حساب تلقائي قياسي (الراتب / 30 يوماً)",
+    empSalarySavedSuccess: "تم حفظ راتب العامل بنجاح.",
+    empAttendanceSavedSuccess: "تم تحديث سجل الحضور بنجاح.",
+    empEditSalaryBtn: "تحديد الراتب",
+    empDayMon: "إثنين",
+    empDayTue: "ثلاثاء",
+    empDayWed: "أربعاء",
+    empDayThu: "خميس",
+    empDayFri: "جمعة",
+    empDaySat: "سبت",
+    empDaySun: "أحد",
+    empDailySalaryRate: "الأجر اليومي",
+    empWorkingDaysBasis: "على أساس 30 يوماً",
+    empMonthDaysLegend: "دليل الحالات :",
+    empQuickStatusPrompt: "تغيير حالة اليوم :",
+    empSearchEmpPlaceholder: "بحث عن عامل...",
+    empAllDepartments: "جميع الأقسام",
+    empSelectCaisse: "الصندوق المالي (اختياري)",
+    empNoCaisseAffect: "-- بدون تأثير على الصندوق --",
+    empRepayDebtTitle: "تسديد دين الموظف",
+    empRepayAdvTitle: "استرجاع سلفة على الراتب",
+    empBtnRepay: "تسديد",
+    empBtnRefundAdv: "استرجاع",
+    empRepayAmount: "المبلغ المراد تسديده (دج)",
+    empRepayCaisse: "صندوق التحصيل",
+    empToastRepaySaved: "تم تسجيل التسديد بنجاح",
+    empToastAdvRefunded: "تم استرجاع السلفة بنجاح",
+    empQuickPointageToday: "تسجيل الحضور السريع لليوم",
+    empPointedStatus: "الحالة الحالية :",
+    empNotPointed: "غير مسجل",
+    empMarkPresent1j: "يوم كامل (1 يوم)",
+    empMarkHalfDay: "نصف يوم (0.5 يوم)",
+    empMarkAbsent: "غائب (0 يوم)",
+    empSelfPointageBadge: "تسجيل حضوري الشخصي",
   }
 };

@@ -4,7 +4,7 @@ import {
   RefreshCw, AlertTriangle, CheckCircle2,
   BarChart2, ShoppingCart, Clock, Package, CreditCard,
   Truck, Landmark, Users, Settings, Sparkles, ChevronDown, ChevronRight,
-  Globe
+  Globe, Calendar, Zap
 } from 'lucide-react';
 import {
   PERMISSION_MODULES,
@@ -508,6 +508,8 @@ export default function UserManagementModal({
       case 'Users': return <Users size={size} />;
       case 'Settings': return <Settings size={size} />;
       case 'UserCheck': return <UserCheck size={size} />;
+      case 'Calendar': return <Calendar size={size} />;
+      case 'Zap': return <Zap size={size} />;
       default: return <Shield size={size} />;
     }
   };

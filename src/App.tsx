@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Settings,
   AlertTriangle,
@@ -16,7 +16,9 @@ import {
   Clock,
   BarChart2,
   ShoppingCart,
-  Zap
+  Zap,
+  Calendar,
+  Bell
 } from 'lucide-react';
 import SettingsPage from './components/SettingsPage';
 import FournisseursPage from './components/FournisseursPage';
@@ -31,6 +33,8 @@ import ServicesPage from './components/ServicesPage';
 import UserManagementModal from './components/UserManagementModal';
 import appLogo from './assets/app-logo.png';
 import ActivationScreen from './components/ActivationScreen';
+import ExpirationAlertsModal from './components/ExpirationAlertsModal';
+import ExpirationPage from './components/ExpirationPage';
 import { hasModuleAccess, getPermissionSummary } from './permissions';
 import { translations } from './i18n';
 import type { Language, Translations } from './i18n';
@@ -83,11 +87,13 @@ declare global {
       getProducts: (filters?: any) => Promise<{ success: boolean; products?: any[]; totalCount?: number; totalPages?: number; page?: number; kpis?: any; message?: string }>;
       getProductById: (id: number) => Promise<{ success: boolean; product?: any; units?: any[]; supplier_prices?: any[]; message?: string }>;
       createProduct: (data: any) => Promise<{ success: boolean; id?: number; message?: string }>;
+      getNextSku?: () => Promise<{ success: boolean; sku: string }>;
       updateProduct: (data: any) => Promise<{ success: boolean; message?: string }>;
       deleteProduct: (id: number) => Promise<{ success: boolean; message?: string }>;
       toggleProductFavorite: (id: number) => Promise<{ success: boolean; is_favorite?: number; message?: string }>;
       updateProductStock: (data: { productId: number; newStock: number; reason?: string }) => Promise<{ success: boolean; message?: string }>;
       getSupplierComparison: (id: number) => Promise<{ success: boolean; comparison?: any[]; minPrice?: number; message?: string }>;
+      getExpirationAlerts?: () => Promise<{ success: boolean; counts?: any; lists?: any; message?: string }>;
       getCategories: () => Promise<{ success: boolean; categories?: any[]; message?: string }>;
       createCategory: (data: any) => Promise<{ success: boolean; id?: number; message?: string }>;
       updateCategory: (data: any) => Promise<{ success: boolean; message?: string }>;
@@ -107,13 +113,20 @@ declare global {
       updateEmployee: (data: any) => Promise<{ success: boolean; message?: string }>;
       deleteEmployee: (id: number) => Promise<{ success: boolean; message?: string }>;
       addEmployeeAdvance: (data: any) => Promise<{ success: boolean; id?: number; message?: string }>;
+      repayEmployeeAdvance?: (data: any) => Promise<{ success: boolean; message?: string }>;
       deleteEmployeeAdvance: (id: number) => Promise<{ success: boolean; message?: string }>;
       paySalary: (data: any) => Promise<{ success: boolean; id?: number; message?: string }>;
       deleteEmployeePayment: (id: number) => Promise<{ success: boolean; message?: string }>;
       addEmployeeDebt: (data: any) => Promise<{ success: boolean; id?: number; message?: string }>;
+      repayEmployeeDebt?: (data: any) => Promise<{ success: boolean; remaining?: number; status?: string; message?: string }>;
       deleteEmployeeDebt: (id: number) => Promise<{ success: boolean; message?: string }>;
       getEmployeeKpis: (filters?: any) => Promise<{ success: boolean; kpis?: any; message?: string }>;
-      getEmployeeDepartments: () => Promise<{ success: boolean; departments?: string[] }>;
+            getEmployeeDepartments: () => Promise<{ success: boolean; departments?: string[] }>;
+      updateEmployeeSalary?: (data: { id: number; base_salary: number; daily_rate?: number; salary_type?: string; notes?: string }) => Promise<{ success: boolean; message?: string }>;
+      getEmployeeAttendance?: (params: { employee_id?: number; month?: string; year?: number | string; date_from?: string; date_to?: string }) => Promise<{ success: boolean; records?: any[]; message?: string }>;
+      saveEmployeeAttendance?: (data: { employee_id: number; date: string; status: string; hours?: number; notes?: string }) => Promise<{ success: boolean; message?: string }>;
+      bulkSaveEmployeeAttendance?: (data: { employee_id: number; entries: Array<{ date: string; status: string; hours?: number; notes?: string }> }) => Promise<{ success: boolean; message?: string }>;
+      deleteEmployeeAttendance?: (data: { employee_id: number; date: string }) => Promise<{ success: boolean; message?: string }>;
 
       // Multi-Caisse & Trésorerie
       getCaisses: (params?: any) => Promise<{ success: boolean; caisses?: any[]; message?: string }>;
@@ -166,7 +179,7 @@ declare global {
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<'products' | 'clients' | 'fournisseurs' | 'ventes' | 'services' | 'historique' | 'dashboard' | 'paiement' | 'caisses' | 'settings' | 'account'>('ventes');
+  const [activeTab, setActiveTab] = useState<'products' | 'clients' | 'fournisseurs' | 'ventes' | 'services' | 'historique' | 'dashboard' | 'paiement' | 'caisses' | 'settings' | 'account' | 'expirations'>('ventes');
   const [mountedTabs, setMountedTabs] = useState<Set<string>>(() => new Set(['ventes']));
 
   useEffect(() => {
@@ -204,6 +217,80 @@ export default function App() {
   const [showRoleModal, setShowRoleModal] = useState(false);
   const [roleModalTargetUser, setRoleModalTargetUser] = useState<any>(null);
 
+  // Employee Self-Attendance for Today state
+  const [todayAttendance, setTodayAttendance] = useState<'none' | 'present' | 'half_day' | 'absent'>('none');
+  const [savingAttendance, setSavingAttendance] = useState(false);
+
+  const getTodayDateStr = () => {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const fetchTodayAttendance = useCallback(async () => {
+    if (!currentUser?.id) return;
+    try {
+      if (window.electronAPI?.getEmployeeAttendance) {
+        const tDate = getTodayDateStr();
+        const res = await window.electronAPI.getEmployeeAttendance({
+          employee_id: currentUser.id,
+          date_from: tDate,
+          date_to: tDate
+        });
+        if (res?.success && Array.isArray(res.records) && res.records.length > 0) {
+          const rec = res.records[0];
+          setTodayAttendance(rec.status as any);
+        } else {
+          setTodayAttendance('none');
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch today attendance:', e);
+    }
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    fetchTodayAttendance();
+  }, [fetchTodayAttendance]);
+
+  useEffect(() => {
+    const handler = () => fetchTodayAttendance();
+    window.addEventListener('app:attendanceUpdated', handler);
+    return () => window.removeEventListener('app:attendanceUpdated', handler);
+  }, [fetchTodayAttendance]);
+
+  // Guard: if user does not have privilege for paiement, redirect to ventes
+  useEffect(() => {
+    if (currentUser && activeTab === 'paiement' && !hasModuleAccess(currentUser, 'paiement')) {
+      setActiveTab('ventes');
+    }
+  }, [currentUser, activeTab]);
+
+  const handleUpdateTodayAttendance = async (newStatus: string) => {
+    if (!currentUser?.id || savingAttendance) return;
+    setSavingAttendance(true);
+    try {
+      const tDate = getTodayDateStr();
+      const hours = newStatus === 'half_day' ? 4 : newStatus === 'present' ? 8 : 0;
+      const res = await window.electronAPI?.saveEmployeeAttendance?.({
+        employee_id: currentUser.id,
+        date: tDate,
+        status: newStatus,
+        hours
+      });
+      if (res?.success) {
+        setTodayAttendance(newStatus as any);
+        window.dispatchEvent(new CustomEvent('app:attendanceUpdated'));
+      }
+    } catch (e) {
+      console.error('Failed to save today attendance:', e);
+    } finally {
+      setSavingAttendance(false);
+    }
+  };
+
   // Dominosoft Software Activation & Mode Démo (3 jours)
   const [activationChecked, setActivationChecked] = useState(false);
   const [isActivated, setIsActivated] = useState(false);
@@ -211,6 +298,43 @@ export default function App() {
   const [demoInfo, setDemoInfo] = useState<any>(null);
   const [activationInfo, setActivationInfo] = useState<any>(null);
   const [showActivationModal, setShowActivationModal] = useState(false);
+
+  // Expiration Alerts state (v3.3.3)
+  const [expirationAlerts, setExpirationAlerts] = useState<{
+    counts: { total: number; expired: number; less1m: number; less2m: number; less3m: number; safe: number };
+    lists: { expired: any[]; less1m: any[]; less2m: any[]; less3m: any[]; allAlerts: any[] };
+  }>({
+    counts: { total: 0, expired: 0, less1m: 0, less2m: 0, less3m: 0, safe: 0 },
+    lists: { expired: [], less1m: [], less2m: [], less3m: [], allAlerts: [] }
+  });
+  const [showExpirationModal, setShowExpirationModal] = useState(false);
+
+  const fetchExpirationAlerts = async () => {
+    try {
+      if (window.electronAPI?.getExpirationAlerts) {
+        const res = await window.electronAPI.getExpirationAlerts();
+        if (res && res.success) {
+          setExpirationAlerts({
+            counts: res.counts || { total: 0, expired: 0, less1m: 0, less2m: 0, less3m: 0, safe: 0 },
+            lists: res.lists || { expired: [], less1m: [], less2m: [], less3m: [], allAlerts: [] }
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching expiration alerts:', err);
+    }
+  };
+
+  useEffect(() => {
+    fetchExpirationAlerts();
+    const handleProductsUpdated = () => fetchExpirationAlerts();
+    window.addEventListener('products:updated', handleProductsUpdated);
+    window.addEventListener('app:refresh', handleProductsUpdated);
+    return () => {
+      window.removeEventListener('products:updated', handleProductsUpdated);
+      window.removeEventListener('app:refresh', handleProductsUpdated);
+    };
+  }, []);
 
   useEffect(() => {
     async function checkLicensing() {
@@ -281,6 +405,7 @@ export default function App() {
       // Dispatch both events: general refresh + specific products refresh for POS
       window.dispatchEvent(new CustomEvent('app:refresh'));
       window.dispatchEvent(new CustomEvent('products:updated'));
+      fetchExpirationAlerts();
     } catch (err) {
       console.error('Error reloading app data & flushing cache:', err);
     }
@@ -303,8 +428,8 @@ export default function App() {
         const res = await window.electronAPI.login({ username, password });
         if (res.success && res.user) {
           setCurrentUser(res.user);
-          const candidateTabs: Array<'ventes' | 'services' | 'dashboard' | 'historique' | 'products' | 'clients' | 'fournisseurs' | 'caisses' | 'paiement' | 'settings' | 'account'> = [
-            'ventes', 'services', 'dashboard', 'historique', 'products', 'clients', 'fournisseurs', 'caisses', 'paiement', 'settings', 'account'
+          const candidateTabs: Array<'ventes' | 'services' | 'dashboard' | 'historique' | 'products' | 'expirations' | 'clients' | 'fournisseurs' | 'caisses' | 'paiement' | 'settings' | 'account'> = [
+            'ventes', 'services', 'dashboard', 'historique', 'products', 'expirations', 'clients', 'fournisseurs', 'caisses', 'paiement', 'settings', 'account'
           ];
           if (!hasModuleAccess(res.user, activeTab)) {
             const firstAllowed = candidateTabs.find(tab => hasModuleAccess(res.user, tab));
@@ -593,19 +718,165 @@ export default function App() {
 
           {/* 4. Produits & Stock Tab */}
           {hasModuleAccess(currentUser, 'products') && (
-            <button 
-              onClick={() => setActiveTab('products')}
-              style={{ 
-                display: 'flex', alignItems: 'center', gap: '10px', width: '100%', padding: '10px 12px', 
-                borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '13px', fontWeight: 600,
-                background: activeTab === 'products' ? '#dcfce7' : 'transparent',
-                color: activeTab === 'products' ? '#15803d' : '#475569',
-                textAlign: currentLang === 'ar' ? 'right' : 'left',
-                transition: 'all 0.15s ease'
-              }}
-            >
-              <Package size={17} /> {t.products}
-            </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+              <button 
+                onClick={() => setActiveTab('products')}
+                style={{ 
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '10px 12px', 
+                  borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '13px', fontWeight: 600,
+                  background: activeTab === 'products' ? '#dcfce7' : 'transparent',
+                  color: activeTab === 'products' ? '#15803d' : '#475569',
+                  textAlign: currentLang === 'ar' ? 'right' : 'left',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <Package size={17} /> {t.products}
+                </div>
+                {expirationAlerts.counts.total > 0 && (
+                  <span 
+                    style={{
+                      background: expirationAlerts.counts.expired > 0 ? '#dc2626' : expirationAlerts.counts.less1m > 0 ? '#ef4444' : expirationAlerts.counts.less2m > 0 ? '#ea580c' : '#eab308',
+                      color: '#ffffff',
+                      fontSize: '10px',
+                      fontWeight: 800,
+                      padding: '1px 6px',
+                      borderRadius: '10px'
+                    }}
+                    title={`${expirationAlerts.counts.total} produit(s) avec alerte de péremption`}
+                  >
+                    {expirationAlerts.counts.total}
+                  </span>
+                )}
+              </button>
+
+              {/* v3.3.3: Page & Notification d'expiration dans la barre latérale */}
+              {hasModuleAccess(currentUser, 'expirations') && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('expirations')}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  width: '100%',
+                  padding: '7px 12px',
+                  borderRadius: '8px',
+                  border: expirationAlerts.counts.expired > 0 
+                    ? '1px solid #fecaca' 
+                    : expirationAlerts.counts.less1m > 0 
+                    ? '1px solid #fecdd3' 
+                    : expirationAlerts.counts.less2m > 0
+                    ? '1px solid #fed7aa'
+                    : expirationAlerts.counts.less3m > 0
+                    ? '1px solid #fef08a'
+                    : '1px solid #e2e8f0',
+                  cursor: 'pointer',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  background: expirationAlerts.counts.expired > 0 
+                    ? '#fef2f2' 
+                    : expirationAlerts.counts.less1m > 0 
+                    ? '#fff1f2' 
+                    : expirationAlerts.counts.less2m > 0
+                    ? '#fff7ed'
+                    : expirationAlerts.counts.less3m > 0
+                    ? '#fefce8'
+                    : '#f8fafc',
+                  color: expirationAlerts.counts.expired > 0 
+                    ? '#dc2626' 
+                    : expirationAlerts.counts.less1m > 0 
+                    ? '#ef4444' 
+                    : expirationAlerts.counts.less2m > 0
+                    ? '#ea580c'
+                    : expirationAlerts.counts.less3m > 0
+                    ? '#ca8a04'
+                    : '#64748b',
+                  transition: 'all 0.15s ease'
+                }}
+                title="Consulter les produits expirés ou proches de la péremption (< 1 mois, < 2 mois, < 3 mois)"
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Calendar size={14} color={
+                    expirationAlerts.counts.expired > 0 
+                      ? '#dc2626' 
+                      : expirationAlerts.counts.less1m > 0 
+                      ? '#ef4444' 
+                      : expirationAlerts.counts.less2m > 0
+                      ? '#ea580c'
+                      : expirationAlerts.counts.less3m > 0
+                      ? '#ca8a04'
+                      : '#94a3b8'
+                  } />
+                  <span>{t.expirationSidebarBtn}</span>
+                </div>
+                
+                {/* Badges de couleur par niveau d'alerte */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                  {expirationAlerts.counts.expired > 0 && (
+                    <span style={{
+                      background: '#dc2626',
+                      color: '#ffffff',
+                      fontSize: '9px',
+                      fontWeight: 800,
+                      padding: '1px 5px',
+                      borderRadius: '8px'
+                    }} title={`${expirationAlerts.counts.expired} déjà périmé(s)`}>
+                      {expirationAlerts.counts.expired} périmé
+                    </span>
+                  )}
+                  {expirationAlerts.counts.less1m > 0 && (
+                    <span style={{
+                      background: '#ef4444',
+                      color: '#ffffff',
+                      fontSize: '9px',
+                      fontWeight: 800,
+                      padding: '1px 5px',
+                      borderRadius: '8px'
+                    }} title={`${expirationAlerts.counts.less1m} à moins d'un mois`}>
+                      {expirationAlerts.counts.less1m} &lt;1m
+                    </span>
+                  )}
+                  {expirationAlerts.counts.less2m > 0 && (
+                    <span style={{
+                      background: '#ea580c',
+                      color: '#ffffff',
+                      fontSize: '9px',
+                      fontWeight: 800,
+                      padding: '1px 5px',
+                      borderRadius: '8px'
+                    }} title={`${expirationAlerts.counts.less2m} à moins de 2 mois`}>
+                      {expirationAlerts.counts.less2m} &lt;2m
+                    </span>
+                  )}
+                  {expirationAlerts.counts.less3m > 0 && (
+                    <span style={{
+                      background: '#ca8a04',
+                      color: '#ffffff',
+                      fontSize: '9px',
+                      fontWeight: 800,
+                      padding: '1px 5px',
+                      borderRadius: '8px'
+                    }} title={`${expirationAlerts.counts.less3m} à moins de 3 mois`}>
+                      {expirationAlerts.counts.less3m} &lt;3m
+                    </span>
+                  )}
+                  {expirationAlerts.counts.total === 0 && (
+                    <span style={{
+                      background: '#e2e8f0',
+                      color: '#64748b',
+                      fontSize: '9px',
+                      fontWeight: 600,
+                      padding: '1px 5px',
+                      borderRadius: '8px'
+                    }}>
+                      0
+                    </span>
+                  )}
+                </div>
+              </button>
+              )}
+            </div>
           )}
 
           {/* 5. Clients & Dettes Tab */}
@@ -758,6 +1029,83 @@ export default function App() {
               </div>
             </div>
           </div>
+          {/* Quick attendance buttons in sidebar for logged-in user */}
+          <div style={{ marginBottom: '10px', background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '8px 10px' }}>
+            <div style={{ fontSize: '10px', fontWeight: 700, color: '#475569', marginBottom: '6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <Calendar size={11} color="#16a34a" /> {t.empQuickPointageToday || "Pointage Aujourd'hui"}
+              </span>
+              <span style={{
+                fontSize: '9px',
+                padding: '1px 5px',
+                borderRadius: '4px',
+                fontWeight: 800,
+                background: todayAttendance === 'present' ? '#dcfce7' : todayAttendance === 'half_day' ? '#ffedd5' : todayAttendance === 'absent' ? '#fee2e2' : '#f1f5f9',
+                color: todayAttendance === 'present' ? '#15803d' : todayAttendance === 'half_day' ? '#c2410c' : todayAttendance === 'absent' ? '#dc2626' : '#64748b'
+              }}>
+                {todayAttendance === 'present' ? (t.attPresent || 'Présent') : todayAttendance === 'half_day' ? (t.attHalfDay || '0.5j') : todayAttendance === 'absent' ? (t.attAbsent || 'Absent') : (t.empNotPointed || 'Non pointé')}
+              </span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px' }}>
+              <button
+                type="button"
+                onClick={() => handleUpdateTodayAttendance('present')}
+                disabled={savingAttendance}
+                title={t.attPresent || "Journée complète (1j)"}
+                style={{
+                  padding: '5px 2px',
+                  borderRadius: '6px',
+                  border: todayAttendance === 'present' ? '2px solid #16a34a' : '1px solid #e2e8f0',
+                  background: todayAttendance === 'present' ? '#dcfce7' : '#ffffff',
+                  color: '#15803d',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  textAlign: 'center'
+                }}
+              >
+                🟢 1j
+              </button>
+              <button
+                type="button"
+                onClick={() => handleUpdateTodayAttendance('half_day')}
+                disabled={savingAttendance}
+                title={t.attHalfDay || "Demi-journée (0.5j)"}
+                style={{
+                  padding: '5px 2px',
+                  borderRadius: '6px',
+                  border: todayAttendance === 'half_day' ? '2px solid #ea580c' : '1px solid #e2e8f0',
+                  background: todayAttendance === 'half_day' ? '#ffedd5' : '#ffffff',
+                  color: '#c2410c',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  textAlign: 'center'
+                }}
+              >
+                🟠 0.5j
+              </button>
+              <button
+                type="button"
+                onClick={() => handleUpdateTodayAttendance('absent')}
+                disabled={savingAttendance}
+                title={t.attAbsent || "Absent (0j)"}
+                style={{
+                  padding: '5px 2px',
+                  borderRadius: '6px',
+                  border: todayAttendance === 'absent' ? '2px solid #dc2626' : '1px solid #e2e8f0',
+                  background: todayAttendance === 'absent' ? '#fee2e2' : '#ffffff',
+                  color: '#dc2626',
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  textAlign: 'center'
+                }}
+              >
+                🔴 0j
+              </button>
+            </div>
+          </div>
           <button 
             onClick={() => setCurrentUser(null)}
             className="btn-danger"
@@ -807,6 +1155,8 @@ export default function App() {
             <h2 style={{ fontSize: '16px', fontWeight: 700, color: '#0f172a', margin: 0 }}>
               {activeTab === 'products'
                 ? t.productsHeading
+                : activeTab === 'expirations'
+                ? t.expirationPageTitle
                 : activeTab === 'clients'
                 ? t.clientsHeading
                 : activeTab === 'fournisseurs' 
@@ -853,6 +1203,49 @@ export default function App() {
                 <span style={{ textDecoration: 'underline', color: '#15803d', fontWeight: 800 }}>Activer</span>
               </button>
             )}
+            {/* Quick Today Attendance in Top Header */}
+            {currentUser && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: todayAttendance === 'present' ? '#f0fdf4' : todayAttendance === 'half_day' ? '#fff7ed' : todayAttendance === 'absent' ? '#fef2f2' : '#f8fafc',
+                  border: `1px solid ${todayAttendance === 'present' ? '#bbf7d0' : todayAttendance === 'half_day' ? '#fed7aa' : todayAttendance === 'absent' ? '#fecaca' : '#e2e8f0'}`,
+                  borderRadius: '8px',
+                  padding: '4px 8px',
+                  fontSize: '12px'
+                }}
+                title={`${t.empQuickPointageToday} (${getTodayDateStr()})`}
+              >
+                <span style={{ fontSize: '11px', fontWeight: 700, color: '#475569', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <Calendar size={13} color="#16a34a" />
+                  <span style={{ display: 'inline' }}>{t.empPointedStatus || "Pointage :"}</span>
+                </span>
+
+                <select
+                  value={todayAttendance || 'none'}
+                  onChange={(e) => handleUpdateTodayAttendance(e.target.value)}
+                  disabled={savingAttendance}
+                  style={{
+                    border: 'none',
+                    background: 'transparent',
+                    fontSize: '11px',
+                    fontWeight: 800,
+                    color: todayAttendance === 'present' ? '#15803d' : todayAttendance === 'half_day' ? '#c2410c' : todayAttendance === 'absent' ? '#dc2626' : '#64748b',
+                    cursor: 'pointer',
+                    outline: 'none',
+                    padding: '2px 4px'
+                  }}
+                >
+                  <option value="none">⚪ {t.empNotPointed || "Non pointé"}</option>
+                  <option value="present">🟢 {t.attPresent || "Présent"} (1j)</option>
+                  <option value="half_day">🟠 {t.attHalfDay || "Demi-journée"} (0.5j)</option>
+                  <option value="absent">🔴 {t.attAbsent || "Absent"} (0j)</option>
+                </select>
+              </div>
+            )}
+
             {/* Quick language toggle */}
             <button 
               type="button"
@@ -866,6 +1259,40 @@ export default function App() {
                 {currentLang === 'fr' ? 'FR 🇫🇷' : currentLang === 'en' ? 'EN 🇬🇧' : 'AR 🇲🇦'}
               </span>
             </button>
+
+                        {hasModuleAccess(currentUser, 'expirations') && (
+              <button 
+                type="button"
+                onClick={() => setActiveTab('expirations')} 
+                className="btn-secondary" 
+                style={{
+                  position: 'relative',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  borderColor: expirationAlerts.counts.expired > 0 ? '#fecaca' : expirationAlerts.counts.total > 0 ? '#fed7aa' : undefined,
+                  background: expirationAlerts.counts.expired > 0 ? '#fef2f2' : expirationAlerts.counts.total > 0 ? '#fff7ed' : undefined,
+                  color: expirationAlerts.counts.expired > 0 ? '#dc2626' : expirationAlerts.counts.total > 0 ? '#ea580c' : undefined
+                }}
+                title={t.expirationPageTitle}
+              >
+                <Bell size={14} color={expirationAlerts.counts.expired > 0 ? '#dc2626' : expirationAlerts.counts.total > 0 ? '#ea580c' : '#64748b'} />
+                <span style={{ fontWeight: 700, fontSize: '12px' }}>{t.expirationSidebarBtn}</span>
+                {expirationAlerts.counts.total > 0 && (
+                  <span style={{
+                    background: expirationAlerts.counts.expired > 0 ? '#dc2626' : expirationAlerts.counts.less1m > 0 ? '#ef4444' : expirationAlerts.counts.less2m > 0 ? '#ea580c' : '#ca8a04',
+                    color: '#ffffff',
+                    fontSize: '10px',
+                    fontWeight: 800,
+                    padding: '1px 6px',
+                    borderRadius: '10px',
+                    lineHeight: '1.2'
+                  }}>
+                    {expirationAlerts.counts.total}
+                  </span>
+                )}
+              </button>
+            )}
 
             <button onClick={reloadData} className="btn-secondary" title="Actualiser la base SQLite">
               <RefreshCw size={14} /> {t.refresh}
@@ -894,7 +1321,26 @@ export default function App() {
               />
             </div>
           )}
-          {mountedTabs.has('clients') && (
+          
+          {mountedTabs.has('expirations') && (
+            <div style={{ display: activeTab === 'expirations' ? 'block' : 'none' }}>
+              <ExpirationPage
+                currentLang={currentLang}
+                currentUser={currentUser}
+                onNavigateToProducts={(prodId) => {
+                  setActiveTab('products');
+                  if (prodId) {
+                    setTimeout(() => {
+                      const row = document.getElementById(`product-row-${prodId}`);
+                      if (row) {
+                        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                      }
+                    }, 300);
+                  }
+                }}
+              />
+            </div>
+          )}{mountedTabs.has('clients') && (
             <div style={{ display: activeTab === 'clients' ? 'block' : 'none' }}>
               <ClientsPage
                 currentLang={currentLang}
@@ -1004,6 +1450,26 @@ export default function App() {
             if (self) setCurrentUser(self);
           }
         }}
+      />
+
+      {/* MODAL: SUIVI DES DATES D'EXPIRATION (v3.3.3) */}
+      <ExpirationAlertsModal
+        isOpen={showExpirationModal}
+        onClose={() => setShowExpirationModal(false)}
+        data={expirationAlerts}
+        onRefresh={fetchExpirationAlerts}
+        onNavigateToProduct={(p) => {
+          setShowExpirationModal(false);
+          setActiveTab('products');
+          // Dispatched event to let ProductsPage highlight or search this product
+          setTimeout(() => {
+            const row = document.getElementById(`product-row-${p.id}`);
+            if (row) {
+              row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          }, 300);
+        }}
+        currentLang={currentLang}
       />
 
       {/* MODAL: ACTIVATION / LICENCE DU LOGICIEL (DOMINOSOFT) */}

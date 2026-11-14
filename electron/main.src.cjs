@@ -1570,7 +1570,7 @@ function setupIpcHandlers() {
           p.id, p.name, p.sku, p.barcode, p.base_unit,
           p.stock_quantity, p.min_stock_alert,
           p.selling_price, p.cost_price,
-          p.category_id, p.is_favorite, p.status,
+          p.category_id, p.is_favorite, p.status, p.date_expiration,
           c.name as category_name, c.color as category_color
         FROM products p
         LEFT JOIN categories c ON c.id = p.category_id
@@ -1650,6 +1650,20 @@ function setupIpcHandlers() {
         whereClauses.push('p.stock_quantity <= 0');
       }
 
+      // Expiration status filter
+      const expirationStatus = filters.expirationStatus;
+      if (expirationStatus === 'expired') {
+        whereClauses.push("p.date_expiration IS NOT NULL AND TRIM(p.date_expiration) != '' AND date(p.date_expiration) <= date('now', 'localtime')");
+      } else if (expirationStatus === 'less_1m') {
+        whereClauses.push("p.date_expiration IS NOT NULL AND TRIM(p.date_expiration) != '' AND date(p.date_expiration) > date('now', 'localtime') AND date(p.date_expiration) <= date('now', 'localtime', '+30 days')");
+      } else if (expirationStatus === 'less_2m') {
+        whereClauses.push("p.date_expiration IS NOT NULL AND TRIM(p.date_expiration) != '' AND date(p.date_expiration) > date('now', 'localtime', '+30 days') AND date(p.date_expiration) <= date('now', 'localtime', '+60 days')");
+      } else if (expirationStatus === 'less_3m') {
+        whereClauses.push("p.date_expiration IS NOT NULL AND TRIM(p.date_expiration) != '' AND date(p.date_expiration) > date('now', 'localtime', '+60 days') AND date(p.date_expiration) <= date('now', 'localtime', '+90 days')");
+      } else if (expirationStatus === 'all_alerts') {
+        whereClauses.push("p.date_expiration IS NOT NULL AND TRIM(p.date_expiration) != '' AND date(p.date_expiration) <= date('now', 'localtime', '+90 days')");
+      }
+
       // Favorite filter
       if (filters.isFavorite === true || filters.isFavorite === 1 || filters.isFavorite === '1') {
         whereClauses.push('p.is_favorite = 1');
@@ -1678,6 +1692,7 @@ function setupIpcHandlers() {
       else if (sortBy === 'price_desc') orderSql = 'ORDER BY p.selling_price DESC';
       else if (sortBy === 'stock_asc') orderSql = 'ORDER BY p.stock_quantity ASC';
       else if (sortBy === 'stock_desc') orderSql = 'ORDER BY p.stock_quantity DESC';
+      else if (sortBy === 'expiration_asc') orderSql = "ORDER BY CASE WHEN p.date_expiration IS NULL OR TRIM(p.date_expiration) = '' THEN 1 ELSE 0 END, p.date_expiration ASC";
       else if (sortBy === 'newest') orderSql = 'ORDER BY p.id DESC';
 
       // Pagination
@@ -1818,6 +1833,27 @@ function setupIpcHandlers() {
     }
   });
 
+  // Generate next collision-proof SKU
+  ipcMain.handle('products:nextSku', async () => {
+    try {
+      const lastRow = db.prepare("SELECT sku FROM products WHERE sku LIKE 'SKU-%' ORDER BY CAST(SUBSTR(sku,5) AS INTEGER) DESC LIMIT 1").get();
+      let seq = 1000;
+      if (lastRow) {
+        const n = parseInt(lastRow.sku.replace('SKU-', '')) || 0;
+        if (n >= seq) seq = n + 1;
+      }
+      // Also ensure the generated SKU doesn't already exist (edge cases)
+      let candidate = `SKU-${seq}`;
+      while (db.prepare('SELECT 1 FROM products WHERE sku = ?').get(candidate)) {
+        seq++;
+        candidate = `SKU-${seq}`;
+      }
+      return { success: true, sku: candidate };
+    } catch (e) {
+      return { success: false, sku: 'SKU-' + Date.now() };
+    }
+  });
+
   // Create product with units and supplier comparisons
   ipcMain.handle('products:create', async (event, data) => {
     try {
@@ -1840,12 +1876,34 @@ function setupIpcHandlers() {
         selling_price = 0,
         status = 'active',
         notes = '',
+        date_expiration,
         units = [],
         supplier_prices = []
       } = data;
 
-      if (!name || !sku) {
-        return { success: false, message: 'Le nom et le SKU du produit sont obligatoires' };
+      let finalSku = (sku || '').trim();
+      if (!name) {
+        return { success: false, message: 'Le nom du produit est obligatoire' };
+      }
+      if (!finalSku) {
+        // Auto-generate collision-proof SKU if not provided
+        const lastRow = db.prepare("SELECT sku FROM products WHERE sku LIKE 'SKU-%' ORDER BY CAST(SUBSTR(sku,5) AS INTEGER) DESC LIMIT 1").get();
+        let seq = 1000;
+        if (lastRow) {
+          const n = parseInt(lastRow.sku.replace('SKU-', '')) || 0;
+          if (n >= seq) seq = n + 1;
+        }
+        finalSku = `SKU-${seq}`;
+        while (db.prepare('SELECT 1 FROM products WHERE sku = ?').get(finalSku)) {
+          seq++;
+          finalSku = `SKU-${seq}`;
+        }
+      }
+
+      // Check for duplicate SKU before attempting insert
+      const existingSku = db.prepare('SELECT id FROM products WHERE TRIM(LOWER(sku)) = TRIM(LOWER(?))').get(finalSku);
+      if (existingSku) {
+        return { success: false, message: `Le code SKU "${finalSku}" est déjà utilisé par un autre produit. Veuillez choisir un code SKU unique.` };
       }
 
       let newProductId = null;
@@ -1855,8 +1913,8 @@ function setupIpcHandlers() {
           INSERT INTO products (
             name, sku, barcode, category_id, primary_supplier_id, caisse_id,
             base_unit, stock_quantity, min_stock_alert, cost_price, selling_price,
-            status, is_favorite, notes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            status, is_favorite, notes, date_expiration
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         const res = stmt.run(
@@ -1873,7 +1931,8 @@ function setupIpcHandlers() {
           parseFloat(selling_price) || 0,
           status || 'active',
           data.is_favorite ? 1 : 0,
-          (notes || '').trim()
+          (notes || '').trim(),
+          date_expiration ? String(date_expiration).trim() : null
         );
         newProductId = res.lastInsertRowid;
 
@@ -1930,6 +1989,9 @@ function setupIpcHandlers() {
       return { success: true, id: newProductId };
     } catch (err) {
       console.error('Error creating product:', err);
+      if (err.message && err.message.includes('UNIQUE constraint failed: products.sku')) {
+        return { success: false, message: 'Ce code SKU est déjà utilisé par un autre produit. Veuillez utiliser un SKU unique.' };
+      }
       return { success: false, message: err.message };
     }
   });
@@ -1953,18 +2015,31 @@ function setupIpcHandlers() {
         status,
         is_favorite,
         notes,
+        date_expiration,
         units,
         supplier_prices
       } = data;
 
       if (!id) return { success: false, message: 'ID produit manquant' };
 
+      let cleanSku = (sku || '').trim();
+      if (!cleanSku) {
+        const cur = db.prepare('SELECT sku FROM products WHERE id = ?').get(id);
+        cleanSku = cur ? cur.sku : ('SKU-' + Date.now());
+      } else {
+        const dupSku = db.prepare('SELECT id FROM products WHERE TRIM(LOWER(sku)) = TRIM(LOWER(?)) AND id != ?').get(cleanSku, id);
+        if (dupSku) {
+          return { success: false, message: `Le code SKU "${cleanSku}" est déjà utilisé par un autre produit. Veuillez choisir un SKU unique.` };
+        }
+      }
+
       const updateTx = db.transaction(() => {
         db.prepare(`
           UPDATE products SET
             name = ?, sku = ?, barcode = ?, category_id = ?, primary_supplier_id = ?, caisse_id = ?,
             base_unit = ?, stock_quantity = ?, min_stock_alert = ?, cost_price = ?,
-            selling_price = ?, status = ?, is_favorite = COALESCE(?, is_favorite), notes = ?, updated_at = CURRENT_TIMESTAMP
+            selling_price = ?, status = ?, is_favorite = COALESCE(?, is_favorite), notes = ?,
+            date_expiration = ?, updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(
           name.trim(),
@@ -1981,6 +2056,7 @@ function setupIpcHandlers() {
           status || 'active',
           is_favorite !== undefined ? (is_favorite ? 1 : 0) : null,
           (notes || '').trim(),
+          date_expiration !== undefined ? (date_expiration ? String(date_expiration).trim() : null) : null,
           id
         );
 
@@ -2033,6 +2109,9 @@ function setupIpcHandlers() {
       return { success: true };
     } catch (err) {
       console.error('Error updating product:', err);
+      if (err.message && err.message.includes('UNIQUE constraint failed: products.sku')) {
+        return { success: false, message: 'Ce code SKU est déjà utilisé par un autre produit. Veuillez utiliser un SKU unique.' };
+      }
       return { success: false, message: err.message };
     }
   });
@@ -2119,6 +2198,130 @@ function setupIpcHandlers() {
       return { success: true, comparison, minPrice };
     } catch (err) {
       return { success: false, message: err.message, comparison: [] };
+    }
+  });
+
+  // ─── Products Expiration Alerts (Notification & Alert System) ────────────
+  // Alerts start from 3 months (90 days).
+  // Tiers:
+  //   1. Expired (<= 0 days)           -> Dark Red / Danger
+  //   2. Less than 1 month (1-30 days)  -> Red
+  //   3. Less than 2 months (31-60 days)-> Orange
+  //   4. Less than 3 months (61-90 days)-> Amber / Yellow
+  ipcMain.handle('products:getExpirationAlerts', async () => {
+    try {
+      const rows = db.prepare(`
+        SELECT 
+          p.id, p.name, p.sku, p.barcode, p.base_unit,
+          p.stock_quantity, p.min_stock_alert,
+          p.selling_price, p.cost_price, p.date_expiration,
+          p.category_id, p.status,
+          c.name as category_name, c.color as category_color,
+          f.name as supplier_name, f.phone as supplier_phone
+        FROM products p
+        LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN fournisseurs f ON f.id = p.primary_supplier_id
+        WHERE p.status = 'active'
+          AND p.date_expiration IS NOT NULL
+          AND TRIM(p.date_expiration) != ''
+        ORDER BY date(p.date_expiration) ASC, p.name ASC
+      `).all();
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const expiredList = [];
+      const less1mList = [];
+      const less2mList = [];
+      const less3mList = [];
+      const futureList = []; // > 90 days (safe)
+
+      for (const row of rows) {
+        // Parse date YYYY-MM-DD
+        const parts = row.date_expiration.split('-');
+        let expDate;
+        if (parts.length === 3) {
+          expDate = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+        } else {
+          expDate = new Date(row.date_expiration);
+        }
+        expDate.setHours(0, 0, 0, 0);
+
+        const diffTime = expDate.getTime() - today.getTime();
+        const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+        const item = {
+          ...row,
+          daysRemaining,
+          formattedDate: row.date_expiration
+        };
+
+        if (daysRemaining <= 0) {
+          item.alertTier = 'expired';
+          item.tierLabel = 'Périmé';
+          item.tierColor = '#dc2626'; // Red 600
+          item.tierBg = '#fef2f2';    // Red 50
+          item.tierBorder = '#fecaca';// Red 200
+          expiredList.push(item);
+        } else if (daysRemaining <= 30) {
+          item.alertTier = 'less_1m';
+          item.tierLabel = '< 1 mois';
+          item.tierColor = '#ef4444'; // Red 500
+          item.tierBg = '#fff1f2';    // Rose 50
+          item.tierBorder = '#fecdd3';// Rose 200
+          less1mList.push(item);
+        } else if (daysRemaining <= 60) {
+          item.alertTier = 'less_2m';
+          item.tierLabel = '< 2 mois';
+          item.tierColor = '#f97316'; // Orange 500
+          item.tierBg = '#fff7ed';    // Orange 50
+          item.tierBorder = '#fed7aa';// Orange 200
+          less2mList.push(item);
+        } else if (daysRemaining <= 90) {
+          item.alertTier = 'less_3m';
+          item.tierLabel = '< 3 mois';
+          item.tierColor = '#eab308'; // Amber/Yellow 500
+          item.tierBg = '#fefce8';    // Yellow 50
+          item.tierBorder = '#fef08a';// Yellow 200
+          less3mList.push(item);
+        } else {
+          item.alertTier = 'safe';
+          item.tierLabel = 'Valide';
+          item.tierColor = '#10b981'; // Green 500
+          item.tierBg = '#ecfdf5';
+          item.tierBorder = '#a7f3d0';
+          futureList.push(item);
+        }
+      }
+
+      const totalAlerts = expiredList.length + less1mList.length + less2mList.length + less3mList.length;
+
+      return {
+        success: true,
+        counts: {
+          total: totalAlerts,
+          expired: expiredList.length,
+          less1m: less1mList.length,
+          less2m: less2mList.length,
+          less3m: less3mList.length,
+          safe: futureList.length
+        },
+        lists: {
+          expired: expiredList,
+          less1m: less1mList,
+          less2m: less2mList,
+          less3m: less3mList,
+          allAlerts: [...expiredList, ...less1mList, ...less2mList, ...less3mList]
+        }
+      };
+    } catch (err) {
+      console.error('Error fetching expiration alerts:', err);
+      return {
+        success: false,
+        message: err.message,
+        counts: { total: 0, expired: 0, less1m: 0, less2m: 0, less3m: 0, safe: 0 },
+        lists: { expired: [], less1m: [], less2m: [], less3m: [], allAlerts: [] }
+      };
     }
   });
 
@@ -2953,7 +3156,12 @@ function setupIpcHandlers() {
   ipcMain.handle('employees:create', async (event, data) => {
     try {
       // Generate a username from full_name if not provided
-      const username = (data.username || data.full_name.toLowerCase().replace(/\s+/g, '.') + '_' + Date.now()).trim();
+      let username = (data.username || data.full_name.toLowerCase().replace(/\s+/g, '.')).trim();
+      if (!username) username = 'emp_' + Date.now();
+      const existingUser = db.prepare('SELECT id FROM users WHERE LOWER(username) = LOWER(?)').get(username);
+      if (existingUser) {
+        username = `${username}_${Date.now().toString().slice(-4)}`;
+      }
       const password = data.password || 'password123';
       const res = db.prepare(`
         INSERT INTO users (username, password, full_name, role, phone, address, department, position, base_salary, hire_date, emp_status, cin, notes)
@@ -3002,21 +3210,98 @@ function setupIpcHandlers() {
     }
   });
 
-  // Add advance (references users table)
+  // Add advance (references users table + caisse integration)
   ipcMain.handle('employees:addAdvance', async (event, data) => {
     try {
-      const { employee_id, amount, date, reason, payment_method, reference, notes } = data;
+      const { employee_id, amount, date, reason, payment_method = 'especes', reference, notes, caisse_id, user_name = 'Admin' } = data;
       const num = parseFloat(amount);
       if (isNaN(num) || num <= 0) return { success: false, message: 'Montant invalide' };
       const emp = db.prepare('SELECT full_name FROM users WHERE id = ?').get(employee_id);
       if (!emp) return { success: false, message: 'Employé introuvable' };
+
+      let caisseTransactionId = null;
+      const targetCaisseId = caisse_id ? Number(caisse_id) : null;
+      if (targetCaisseId) {
+        const caisse = db.prepare('SELECT * FROM caisses WHERE id = ?').get(targetCaisseId);
+        if (caisse) {
+          const activeSession = db.prepare("SELECT id FROM caisse_sessions WHERE caisse_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(targetCaisseId);
+          const sessId = activeSession ? activeSession.id : null;
+          let cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Avance Employé'").get();
+          if (!cat) cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Dépense Divers'").get();
+          const catId = cat ? cat.id : null;
+          const refTrx = `ADV-${Date.now().toString().slice(-6)}`;
+          const desc = `Avance sur salaire: ${emp.full_name} (${reason || 'Avance ponctuelle'})`;
+          const expectedBalance = (parseFloat(caisse.current_balance) || 0) - num;
+
+          const txRes = db.prepare(`
+            INSERT INTO caisse_transactions (
+              caisse_id, session_id, type, amount, category_id, category_name,
+              reference, description, payment_method, date, user_name, balance_after
+            ) VALUES (?, ?, 'out', ?, ?, 'Avance Employé', ?, ?, ?, ?, ?, ?)
+          `).run(targetCaisseId, sessId, num, catId, refTrx, desc, payment_method, date || new Date().toISOString().slice(0, 10), user_name, expectedBalance);
+          caisseTransactionId = txRes.lastInsertRowid;
+        }
+      }
+
       const res = db.prepare(`
-        INSERT INTO employee_advances (employee_id, amount, date, reason, payment_method, reference, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(employee_id, num, date || new Date().toISOString().slice(0, 10), reason || '', payment_method || 'especes', reference || '', notes || '');
-      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run('Admin', `Avance de ${num} accordée à ${emp.full_name}`);
+        INSERT INTO employee_advances (employee_id, amount, date, reason, payment_method, reference, notes, caisse_id, caisse_transaction_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(employee_id, num, date || new Date().toISOString().slice(0, 10), reason || '', payment_method, reference || '', notes || '', targetCaisseId, caisseTransactionId);
+      
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('employees:');
+      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(user_name, `Avance de ${num} accordée à ${emp.full_name}${targetCaisseId ? ' (Décaissée)' : ''}`);
       return { success: true, id: res.lastInsertRowid };
     } catch (err) {
+      console.error('Error in employees:addAdvance:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // Repay / refund advance directly (restituer l'avance en caisse)
+  ipcMain.handle('employees:repayAdvance', async (event, data) => {
+    try {
+      const { advance_id, amount, date, payment_method = 'especes', caisse_id, notes = '', user_name = 'Admin' } = data;
+      const adv = db.prepare('SELECT a.*, u.full_name FROM employee_advances a JOIN users u ON a.employee_id = u.id WHERE a.id = ?').get(advance_id);
+      if (!adv) return { success: false, message: 'Avance introuvable' };
+
+      const num = parseFloat(amount) || parseFloat(adv.amount);
+      if (num <= 0) return { success: false, message: 'Montant invalide' };
+
+      const targetCaisseId = caisse_id ? Number(caisse_id) : null;
+      if (targetCaisseId) {
+        const caisse = db.prepare('SELECT * FROM caisses WHERE id = ?').get(targetCaisseId);
+        if (caisse) {
+          const activeSession = db.prepare("SELECT id FROM caisse_sessions WHERE caisse_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(targetCaisseId);
+          const sessId = activeSession ? activeSession.id : null;
+          let cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Remboursement Avance Employé'").get();
+          if (!cat) cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Entrée Exceptionnelle'").get();
+          const catId = cat ? cat.id : null;
+          const refTrx = `RGL-ADV-${Date.now().toString().slice(-6)}`;
+          const desc = `Restitution avance salaire: ${adv.full_name} (${notes || ''})`;
+          const expectedBalance = (parseFloat(caisse.current_balance) || 0) + num;
+
+          db.prepare(`
+            INSERT INTO caisse_transactions (
+              caisse_id, session_id, type, amount, category_id, category_name,
+              reference, description, payment_method, date, user_name, balance_after
+            ) VALUES (?, ?, 'in', ?, ?, 'Remboursement Avance Employé', ?, ?, ?, ?, ?, ?)
+          `).run(targetCaisseId, sessId, num, catId, refTrx, desc, payment_method, date || new Date().toISOString().slice(0, 10), user_name, expectedBalance);
+        }
+      }
+
+      if (num >= adv.amount) {
+        db.prepare('DELETE FROM employee_advances WHERE id = ?').run(advance_id);
+      } else {
+        db.prepare('UPDATE employee_advances SET amount = amount - ? WHERE id = ?').run(num, advance_id);
+      }
+
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('employees:');
+      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(user_name, `Restitution avance de ${num} DA par ${adv.full_name}`);
+      return { success: true };
+    } catch (err) {
+      console.error('Error in employees:repayAdvance:', err);
       return { success: false, message: err.message };
     }
   });
@@ -3024,31 +3309,68 @@ function setupIpcHandlers() {
   // Delete advance
   ipcMain.handle('employees:deleteAdvance', async (event, id) => {
     try {
+      const adv = db.prepare('SELECT * FROM employee_advances WHERE id = ?').get(id);
+      if (adv && adv.caisse_transaction_id) {
+        db.prepare('DELETE FROM caisse_transactions WHERE id = ?').run(adv.caisse_transaction_id);
+      }
       db.prepare('DELETE FROM employee_advances WHERE id = ?').run(id);
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('employees:');
       return { success: true };
     } catch (err) {
       return { success: false, message: err.message };
     }
   });
 
-  // Pay salary (references users table)
+  // Pay salary (references users table + caisse integration)
   ipcMain.handle('employees:paySalary', async (event, data) => {
     try {
-      const { employee_id, month, year, base_salary, bonuses, deductions, advance_deducted, net_paid, payment_method, payment_date, notes } = data;
+      const { employee_id, month, year, base_salary, bonuses, deductions, advance_deducted, net_paid, payment_method = 'especes', payment_date, notes, caisse_id, user_name = 'Admin' } = data;
       const emp = db.prepare('SELECT full_name FROM users WHERE id = ?').get(employee_id);
       if (!emp) return { success: false, message: 'Employé introuvable' };
+
+      const netAmount = parseFloat(net_paid) || 0;
+      let caisseTransactionId = null;
+      const targetCaisseId = caisse_id ? Number(caisse_id) : null;
+      if (targetCaisseId && netAmount > 0) {
+        const caisse = db.prepare('SELECT * FROM caisses WHERE id = ?').get(targetCaisseId);
+        if (caisse) {
+          const activeSession = db.prepare("SELECT id FROM caisse_sessions WHERE caisse_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(targetCaisseId);
+          const sessId = activeSession ? activeSession.id : null;
+          let cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Paiement Salaire'").get();
+          if (!cat) cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Dépense Divers'").get();
+          const catId = cat ? cat.id : null;
+          const refTrx = `SAL-${Date.now().toString().slice(-6)}`;
+          const desc = `Paiement salaire: ${emp.full_name} (${month}/${year})`;
+          const expectedBalance = (parseFloat(caisse.current_balance) || 0) - netAmount;
+
+          const txRes = db.prepare(`
+            INSERT INTO caisse_transactions (
+              caisse_id, session_id, type, amount, category_id, category_name,
+              reference, description, payment_method, date, user_name, balance_after
+            ) VALUES (?, ?, 'out', ?, ?, 'Paiement Salaire', ?, ?, ?, ?, ?, ?)
+          `).run(targetCaisseId, sessId, netAmount, catId, refTrx, desc, payment_method, payment_date || new Date().toISOString().slice(0, 10), user_name, expectedBalance);
+          caisseTransactionId = txRes.lastInsertRowid;
+        }
+      }
+
       const res = db.prepare(`
-        INSERT INTO employee_payments (employee_id, month, year, base_salary, bonuses, deductions, advance_deducted, net_paid, payment_method, payment_date, status, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paye', ?)
+        INSERT INTO employee_payments (employee_id, month, year, base_salary, bonuses, deductions, advance_deducted, net_paid, payment_method, payment_date, status, notes, caisse_id, caisse_transaction_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paye', ?, ?, ?)
       `).run(
         employee_id, month, parseInt(year), parseFloat(base_salary) || 0,
         parseFloat(bonuses) || 0, parseFloat(deductions) || 0,
-        parseFloat(advance_deducted) || 0, parseFloat(net_paid) || 0,
-        payment_method || 'especes', payment_date || new Date().toISOString().slice(0, 10), notes || ''
+        parseFloat(advance_deducted) || 0, netAmount,
+        payment_method, payment_date || new Date().toISOString().slice(0, 10), notes || '',
+        targetCaisseId, caisseTransactionId
       );
-      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run('Admin', `Salaire payé à ${emp.full_name}: ${parseFloat(net_paid).toFixed(2)} (${month}/${year})`);
+
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('employees:');
+      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(user_name, `Salaire payé à ${emp.full_name}: ${netAmount.toFixed(2)} DA (${month}/${year})${targetCaisseId ? ' (Décaissé)' : ''}`);
       return { success: true, id: res.lastInsertRowid };
     } catch (err) {
+      console.error('Error in employees:paySalary:', err);
       return { success: false, message: err.message };
     }
   });
@@ -3056,33 +3378,146 @@ function setupIpcHandlers() {
   // Delete payment
   ipcMain.handle('employees:deletePayment', async (event, id) => {
     try {
+      const pmt = db.prepare('SELECT * FROM employee_payments WHERE id = ?').get(id);
+      if (pmt && pmt.caisse_transaction_id) {
+        db.prepare('DELETE FROM caisse_transactions WHERE id = ?').run(pmt.caisse_transaction_id);
+      }
       db.prepare('DELETE FROM employee_payments WHERE id = ?').run(id);
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('employees:');
       return { success: true };
     } catch (err) {
       return { success: false, message: err.message };
     }
   });
 
-  // Add debt
+  // Add debt (with caisse disbursement integration)
   ipcMain.handle('employees:addDebt', async (event, data) => {
     try {
-      const { employee_id, amount, date, description } = data;
+      const { employee_id, amount, date, description, caisse_id, payment_method = 'especes', user_name = 'Admin' } = data;
       const num = parseFloat(amount);
       if (isNaN(num) || num <= 0) return { success: false, message: 'Montant invalide' };
+      const emp = db.prepare('SELECT full_name FROM users WHERE id = ?').get(employee_id);
+      if (!emp) return { success: false, message: 'Employé introuvable' };
+
+      let caisseTransactionId = null;
+      const targetCaisseId = caisse_id ? Number(caisse_id) : null;
+      if (targetCaisseId) {
+        const caisse = db.prepare('SELECT * FROM caisses WHERE id = ?').get(targetCaisseId);
+        if (caisse) {
+          const activeSession = db.prepare("SELECT id FROM caisse_sessions WHERE caisse_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(targetCaisseId);
+          const sessId = activeSession ? activeSession.id : null;
+          let cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Prêt / Dette Employé'").get();
+          if (!cat) cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Dépense Divers'").get();
+          const catId = cat ? cat.id : null;
+          const refTrx = `DETTE-${Date.now().toString().slice(-6)}`;
+          const desc = `Prêt / Dette accordé à l'employé: ${emp.full_name} (${description || ''})`;
+          const expectedBalance = (parseFloat(caisse.current_balance) || 0) - num;
+
+          const txRes = db.prepare(`
+            INSERT INTO caisse_transactions (
+              caisse_id, session_id, type, amount, category_id, category_name,
+              reference, description, payment_method, date, user_name, balance_after
+            ) VALUES (?, ?, 'out', ?, ?, 'Prêt / Dette Employé', ?, ?, ?, ?, ?, ?)
+          `).run(targetCaisseId, sessId, num, catId, refTrx, desc, payment_method, date || new Date().toISOString().slice(0, 10), user_name, expectedBalance);
+          caisseTransactionId = txRes.lastInsertRowid;
+        }
+      }
+
       const res = db.prepare(`
-        INSERT INTO employee_debts (employee_id, amount, remaining, date, description, status)
-        VALUES (?, ?, ?, ?, ?, 'en_cours')
-      `).run(employee_id, num, num, date || new Date().toISOString().slice(0, 10), description || '');
+        INSERT INTO employee_debts (employee_id, amount, remaining, date, description, status, caisse_id, caisse_transaction_id)
+        VALUES (?, ?, ?, ?, ?, 'en_cours', ?, ?)
+      `).run(employee_id, num, num, date || new Date().toISOString().slice(0, 10), description || '', targetCaisseId, caisseTransactionId);
+
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('employees:');
+      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(user_name, `Dette de ${num} DA accordée à ${emp.full_name}${targetCaisseId ? ' (Décaissée)' : ''}`);
       return { success: true, id: res.lastInsertRowid };
     } catch (err) {
+      console.error('Error in employees:addDebt:', err);
       return { success: false, message: err.message };
     }
   });
 
-  // Delete debt
+  // Repay debt (Rembourser la dette de l'employé - encaissement en caisse)
+  ipcMain.handle('employees:repayDebt', async (event, data) => {
+    try {
+      const { debt_id, amount, date, payment_method = 'especes', caisse_id, notes = '', user_name = 'Admin' } = data;
+      const num = parseFloat(amount);
+      if (isNaN(num) || num <= 0) return { success: false, message: 'Montant invalide' };
+
+      const debt = db.prepare('SELECT d.*, u.full_name FROM employee_debts d JOIN users u ON d.employee_id = u.id WHERE d.id = ?').get(debt_id);
+      if (!debt) return { success: false, message: 'Dette introuvable' };
+
+      const curRemaining = parseFloat(debt.remaining) || 0;
+      if (curRemaining <= 0) return { success: false, message: 'Cette dette est déjà entièrement soldée' };
+
+      const actualPayment = Math.min(num, curRemaining);
+      const newRemaining = Math.max(0, parseFloat((curRemaining - actualPayment).toFixed(2)));
+      const newStatus = newRemaining === 0 ? 'solde' : 'en_cours';
+
+      let caisseTransactionId = null;
+      const targetCaisseId = caisse_id ? Number(caisse_id) : null;
+      if (targetCaisseId) {
+        const caisse = db.prepare('SELECT * FROM caisses WHERE id = ?').get(targetCaisseId);
+        if (caisse) {
+          const activeSession = db.prepare("SELECT id FROM caisse_sessions WHERE caisse_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(targetCaisseId);
+          const sessId = activeSession ? activeSession.id : null;
+          let cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Règlement Dette Employé'").get();
+          if (!cat) cat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Entrée Exceptionnelle'").get();
+          const catId = cat ? cat.id : null;
+          const refTrx = `RGL-DETTE-${Date.now().toString().slice(-6)}`;
+          const desc = `Remboursement dette employé: ${debt.full_name} (${notes || ''}) - Reste: ${newRemaining.toFixed(2)} DA`;
+          const expectedBalance = (parseFloat(caisse.current_balance) || 0) + actualPayment;
+
+          const txRes = db.prepare(`
+            INSERT INTO caisse_transactions (
+              caisse_id, session_id, type, amount, category_id, category_name,
+              reference, description, payment_method, date, user_name, balance_after
+            ) VALUES (?, ?, 'in', ?, ?, 'Règlement Dette Employé', ?, ?, ?, ?, ?, ?)
+          `).run(targetCaisseId, sessId, actualPayment, catId, refTrx, desc, payment_method, date || new Date().toISOString().slice(0, 10), user_name, expectedBalance);
+          caisseTransactionId = txRes.lastInsertRowid;
+        }
+      }
+
+      // Update debt
+      db.prepare(`UPDATE employee_debts SET remaining = ?, status = ? WHERE id = ?`).run(newRemaining, newStatus, debt_id);
+
+      // Record repayment
+      db.prepare(`
+        INSERT INTO employee_debt_repayments (debt_id, employee_id, amount, date, caisse_id, caisse_transaction_id, payment_method, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(debt_id, debt.employee_id, actualPayment, date || new Date().toISOString().slice(0, 10), targetCaisseId, caisseTransactionId, payment_method, notes);
+
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('employees:');
+      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(user_name, `Remboursement de ${actualPayment.toFixed(2)} DA sur la dette #${debt_id} par ${debt.full_name}${targetCaisseId ? ' (Encaissé en caisse)' : ''}`);
+      return { success: true, remaining: newRemaining, status: newStatus };
+    } catch (err) {
+      console.error('Error in employees:repayDebt:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // Delete debt (restores caisse transactions if any)
   ipcMain.handle('employees:deleteDebt', async (event, id) => {
     try {
-      db.prepare('DELETE FROM employee_debts WHERE id = ?').run(id);
+      const debt = db.prepare('SELECT * FROM employee_debts WHERE id = ?').get(id);
+      if (debt) {
+        if (debt.caisse_transaction_id) {
+          db.prepare('DELETE FROM caisse_transactions WHERE id = ?').run(debt.caisse_transaction_id);
+        }
+        const reps = db.prepare('SELECT caisse_transaction_id FROM employee_debt_repayments WHERE debt_id = ?').all(id);
+        for (const rep of reps) {
+          if (rep.caisse_transaction_id) {
+            db.prepare('DELETE FROM caisse_transactions WHERE id = ?').run(rep.caisse_transaction_id);
+          }
+        }
+        db.prepare('DELETE FROM employee_debt_repayments WHERE debt_id = ?').run(id);
+        db.prepare('DELETE FROM employee_debts WHERE id = ?').run(id);
+      }
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('employees:');
       return { success: true };
     } catch (err) {
       return { success: false, message: err.message };
@@ -3127,6 +3562,137 @@ function setupIpcHandlers() {
       return { success: true, departments: rows.map(r => r.department) };
     } catch (err) {
       return { success: false, departments: [] };
+    }
+  });
+
+    // Update employee salary configuration (v3.4.0)
+  ipcMain.handle('employees:updateSalary', async (event, data) => {
+    try {
+      const { id, base_salary, daily_rate, salary_type = 'monthly', notes } = data;
+      const salary = parseFloat(base_salary) || 0;
+      const dRate = parseFloat(daily_rate) || (salary > 0 ? Math.round((salary / 30) * 100) / 100 : 0);
+      
+      db.prepare(`
+        UPDATE users 
+        SET base_salary = ?, 
+            daily_rate = ?,
+            salary_type = ?,
+            notes = CASE WHEN ? IS NOT NULL THEN ? ELSE notes END
+        WHERE id = ?
+      `).run(salary, dRate, salary_type, notes !== undefined ? notes : null, notes !== undefined ? notes : null, id);
+
+      const emp = db.prepare('SELECT full_name FROM users WHERE id = ?').get(id);
+      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(
+        'Admin', 
+        `Configuration salaire pour "${emp?.full_name || id}": ${salary.toFixed(2)} DA (Taux jour: ${dRate.toFixed(2)} DA)`
+      );
+      return { success: true };
+    } catch (err) {
+      console.error('Error updating employee salary:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // Get employee attendance records (v3.4.0)
+  ipcMain.handle('employees:getAttendance', async (event, params = {}) => {
+    try {
+      const { employee_id, month, year, date_from, date_to } = params;
+      let sql = 'SELECT * FROM employee_attendance WHERE 1=1';
+      const args = [];
+      if (employee_id) {
+        sql += ' AND employee_id = ?';
+        args.push(employee_id);
+      }
+      if (month && year) {
+        const prefix = `${year}-${String(month).padStart(2, '0')}%`;
+        sql += ' AND date LIKE ?';
+        args.push(prefix);
+      } else if (date_from && date_to) {
+        sql += ' AND date BETWEEN ? AND ?';
+        args.push(date_from, date_to);
+      }
+      sql += ' ORDER BY date ASC';
+      const records = db.prepare(sql).all(...args);
+      return { success: true, records };
+    } catch (err) {
+      console.error('Error fetching employee attendance:', err);
+      return { success: false, message: err.message, records: [] };
+    }
+  });
+
+  // Save single attendance record (v3.4.0)
+  ipcMain.handle('employees:saveAttendance', async (event, data) => {
+    try {
+      const { employee_id, date, status, hours = 8, notes = '' } = data;
+      if (!employee_id || !date || !status) {
+        return { success: false, message: 'Paramètres manquants (employé, date, statut requis)' };
+      }
+      
+      if (status === 'none' || status === 'clear') {
+        db.prepare('DELETE FROM employee_attendance WHERE employee_id = ? AND date = ?').run(employee_id, date);
+      } else {
+        db.prepare(`
+          INSERT INTO employee_attendance (employee_id, date, status, hours, notes)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(employee_id, date) DO UPDATE SET
+            status = excluded.status,
+            hours = excluded.hours,
+            notes = excluded.notes,
+            updated_at = CURRENT_TIMESTAMP
+        `).run(employee_id, date, status, parseFloat(hours) || 8, notes || '');
+      }
+      return { success: true };
+    } catch (err) {
+      console.error('Error saving attendance:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // Bulk save attendance records (v3.4.0)
+  ipcMain.handle('employees:bulkSaveAttendance', async (event, data) => {
+    try {
+      const { employee_id, entries } = data;
+      if (!employee_id || !Array.isArray(entries)) {
+        return { success: false, message: 'Données invalides' };
+      }
+      const upsert = db.prepare(`
+        INSERT INTO employee_attendance (employee_id, date, status, hours, notes)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(employee_id, date) DO UPDATE SET
+          status = excluded.status,
+          hours = excluded.hours,
+          notes = excluded.notes,
+          updated_at = CURRENT_TIMESTAMP
+      `);
+      const deleteStmt = db.prepare(`
+        DELETE FROM employee_attendance WHERE employee_id = ? AND date = ?
+      `);
+
+      db.transaction(() => {
+        for (const item of entries) {
+          if (!item.date) continue;
+          if (item.status === 'none' || item.status === 'clear') {
+            deleteStmt.run(employee_id, item.date);
+          } else {
+            upsert.run(employee_id, item.date, item.status, parseFloat(item.hours) || 8, item.notes || '');
+          }
+        }
+      })();
+      return { success: true };
+    } catch (err) {
+      console.error('Error bulk saving attendance:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // Delete attendance record (v3.4.0)
+  ipcMain.handle('employees:deleteAttendance', async (event, data) => {
+    try {
+      const { employee_id, date } = data;
+      db.prepare('DELETE FROM employee_attendance WHERE employee_id = ? AND date = ?').run(employee_id, date);
+      return { success: true };
+    } catch (err) {
+      return { success: false, message: err.message };
     }
   });
 
@@ -3249,12 +3815,25 @@ function setupIpcHandlers() {
       const { name, code, initial_balance = 0, notes = '', assigned_user_id = null } = data;
       if (!name || !name.trim()) return { success: false, message: 'Le nom de la caisse est obligatoire' };
 
-      const caisseCode = (code && code.trim()) || ('CS-' + Math.floor(1000 + Math.random() * 9000));
+      let caisseCode = (code && code.trim());
+      if (!caisseCode) {
+        let seq = 1;
+        const lastC = db.prepare("SELECT code FROM caisses WHERE code LIKE 'CS-%' ORDER BY id DESC LIMIT 1").get();
+        if (lastC) {
+          const n = parseInt(lastC.code.replace('CS-', '')) || 0;
+          seq = n + 1;
+        }
+        caisseCode = `CS-${String(seq).padStart(4, '0')}`;
+        while (db.prepare('SELECT 1 FROM caisses WHERE code = ?').get(caisseCode)) {
+          seq++;
+          caisseCode = `CS-${String(seq).padStart(4, '0')}`;
+        }
+      } else {
+        const checkCode = db.prepare('SELECT id FROM caisses WHERE code = ?').get(caisseCode);
+        if (checkCode) return { success: false, message: `Le code de caisse "${caisseCode}" existe déjà.` };
+      }
       const initBal = Number(initial_balance) || 0;
       const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
-
-      const checkCode = db.prepare('SELECT id FROM caisses WHERE code = ?').get(caisseCode);
-      if (checkCode) return { success: false, message: `Le code de caisse "${caisseCode}" existe déjà.` };
 
       const insertTx = db.transaction(() => {
         const stmt = db.prepare(`
@@ -3301,6 +3880,12 @@ function setupIpcHandlers() {
     try {
       const { id, name, code, notes, assigned_user_id } = data;
       if (!id) return { success: false, message: 'ID de caisse manquant' };
+
+      const cleanCode = (code || '').trim();
+      if (cleanCode) {
+        const dup = db.prepare('SELECT id FROM caisses WHERE code = ? AND id != ?').get(cleanCode, id);
+        if (dup) return { success: false, message: `Le code de caisse "${cleanCode}" est déjà attribué à une autre caisse.` };
+      }
 
       const stmt = db.prepare(`
         UPDATE caisses 
@@ -3893,6 +4478,8 @@ function setupIpcHandlers() {
         `).run(color || existing.color, icon || existing.icon, description || existing.description, id);
       } else {
         // Custom: can rename and edit all fields
+        const dupCat = db.prepare('SELECT id FROM caisse_transaction_categories WHERE LOWER(name) = LOWER(?) AND id != ?').get(name.trim(), id);
+        if (dupCat) return { success: false, message: 'Une catégorie avec ce nom existe déjà.' };
         db.prepare(`
           UPDATE caisse_transaction_categories
           SET name = ?, type = ?, color = ?, icon = ?, description = ?
@@ -4088,10 +4675,14 @@ function setupIpcHandlers() {
         }
       }
 
-      // Generate sale number: V-YYYYMMDD-XXXX
-      const datePart = new Date().toISOString().slice(0,10).replace(/-/g,'');
-      const countToday = db.prepare("SELECT COUNT(*) as c FROM ventes WHERE date(created_at) = date('now')").get().c;
-      const saleNumber = `V-${datePart}-${String(countToday + 1).padStart(4,'0')}`;
+      // Generate sale number: V-YYYYMMDD-XXXX (MAX-based, collision-proof)
+      const _now = new Date();
+      const datePart = `${_now.getFullYear()}${String(_now.getMonth()+1).padStart(2,'0')}${String(_now.getDate()).padStart(2,'0')}`;
+      const _prefix = `V-${datePart}-`;
+      const _lastRow = db.prepare("SELECT sale_number FROM ventes WHERE sale_number LIKE ? ORDER BY sale_number DESC LIMIT 1").get(_prefix + '%');
+      let _seq = 1;
+      if (_lastRow) { const _lastSeq = parseInt(_lastRow.sale_number.split('-').pop()) || 0; _seq = _lastSeq + 1; }
+      const saleNumber = `${_prefix}${String(_seq).padStart(4,'0')}`;
 
       // Calculate totals
       let subtotal = 0, totalCost = 0, discountAmount = 0;

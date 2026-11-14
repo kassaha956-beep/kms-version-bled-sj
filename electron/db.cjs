@@ -189,6 +189,7 @@ function initDatabase(userDataPath) {
       status TEXT NOT NULL DEFAULT 'active',
       is_favorite INTEGER DEFAULT 0,
       notes TEXT,
+      date_expiration TEXT DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL,
@@ -272,8 +273,12 @@ function initDatabase(userDataPath) {
       payment_method TEXT DEFAULT 'especes',
       reference TEXT,
       notes TEXT,
+      caisse_id INTEGER,
+      caisse_transaction_id INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE
+      FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE SET NULL,
+      FOREIGN KEY (caisse_transaction_id) REFERENCES caisse_transactions(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS employee_payments (
@@ -290,8 +295,12 @@ function initDatabase(userDataPath) {
       payment_date TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'paye',
       notes TEXT,
+      caisse_id INTEGER,
+      caisse_transaction_id INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE
+      FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE SET NULL,
+      FOREIGN KEY (caisse_transaction_id) REFERENCES caisse_transactions(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS employee_debts (
@@ -302,8 +311,42 @@ function initDatabase(userDataPath) {
       date TEXT NOT NULL,
       description TEXT,
       status TEXT NOT NULL DEFAULT 'en_cours',
+      caisse_id INTEGER,
+      caisse_transaction_id INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE
+      FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE SET NULL,
+      FOREIGN KEY (caisse_transaction_id) REFERENCES caisse_transactions(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS employee_debt_repayments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      debt_id INTEGER NOT NULL,
+      employee_id INTEGER NOT NULL,
+      amount REAL NOT NULL,
+      date TEXT NOT NULL,
+      caisse_id INTEGER,
+      caisse_transaction_id INTEGER,
+      payment_method TEXT DEFAULT 'especes',
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (debt_id) REFERENCES employee_debts(id) ON DELETE CASCADE,
+      FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE SET NULL,
+      FOREIGN KEY (caisse_transaction_id) REFERENCES caisse_transactions(id) ON DELETE SET NULL
+    );
+
+        CREATE TABLE IF NOT EXISTS employee_attendance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      status TEXT NOT NULL,
+      hours REAL DEFAULT 8,
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE(employee_id, date)
     );
 
     -- =====================
@@ -432,6 +475,8 @@ function initDatabase(userDataPath) {
     CREATE INDEX IF NOT EXISTS idx_emp_payments_emp ON employee_payments(employee_id);
     CREATE INDEX IF NOT EXISTS idx_emp_payments_month ON employee_payments(year, month);
     CREATE INDEX IF NOT EXISTS idx_emp_debts_emp ON employee_debts(employee_id);
+    CREATE INDEX IF NOT EXISTS idx_emp_attendance_emp_date ON employee_attendance(employee_id, date);
+    CREATE INDEX IF NOT EXISTS idx_emp_attendance_date ON employee_attendance(date);
 
     CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name);
     CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone);
@@ -754,6 +799,7 @@ function initDatabase(userDataPath) {
           total_out REAL DEFAULT 0,
           net_change REAL DEFAULT 0,
           closing_balance REAL,
+          transaction_count INTEGER DEFAULT 0,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           UNIQUE(date, caisse_id)
         )`);
@@ -850,6 +896,112 @@ function initDatabase(userDataPath) {
 
         // 13. Ensure trg_ventes_ad is clean
         helpers.dropTrigger('trg_ventes_ad');
+      }
+    },
+    // ─────────────────────────────────────────────────────────────────────
+    // MIGRATION v2 — v3.3.3: Product expiration dates
+    // ─────────────────────────────────────────────────────────────────────
+    {
+      version: 2,
+      name: 'v3_3_3_product_expiration_dates',
+      description: 'Adds date_expiration column to products table for perishable product tracking',
+      up: (helpers) => {
+        // Add expiration date column (nullable TEXT in ISO 8601 date format YYYY-MM-DD)
+        helpers.addColumn('products', 'date_expiration', 'TEXT DEFAULT NULL');
+        // Index for fast expiration queries (alerts, sorting)
+        helpers.addIndex(
+          'idx_products_date_expiration',
+          'CREATE INDEX IF NOT EXISTS idx_products_date_expiration ON products(date_expiration)'
+        );
+      }
+    },
+
+    // ─────────────────────────────────────────────────────────────────────
+    // MIGRATION v3 — v3.4.0: Employee attendance tracking & salary configuration
+    // ─────────────────────────────────────────────────────────────────────
+    {
+      version: 3,
+      name: 'v3_4_0_employee_attendance_and_salary',
+      description: 'Adds employee_attendance table for daily presence/half-day/absence calendar tracking and daily_rate to users',
+      up: (helpers) => {
+        // 1. Add daily_rate & salary_type columns to users table
+        helpers.addColumn('users', 'daily_rate', 'REAL DEFAULT 0');
+        helpers.addColumn('users', 'salary_type', "TEXT DEFAULT 'monthly'");
+
+        // 2. Add employee_attendance table
+        helpers.addTable('employee_attendance', `CREATE TABLE IF NOT EXISTS employee_attendance (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          employee_id INTEGER NOT NULL,
+          date TEXT NOT NULL,
+          status TEXT NOT NULL,
+          hours REAL DEFAULT 8,
+          notes TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE,
+          UNIQUE(employee_id, date)
+        )`);
+
+        // 3. Add indexes for fast attendance queries
+        helpers.addIndex(
+          'idx_emp_attendance_emp_date',
+          'CREATE INDEX IF NOT EXISTS idx_emp_attendance_emp_date ON employee_attendance(employee_id, date)'
+        );
+        helpers.addIndex(
+          'idx_emp_attendance_date',
+          'CREATE INDEX IF NOT EXISTS idx_emp_attendance_date ON employee_attendance(date)'
+        );
+      }
+    },
+    // ─────────────────────────────────────────────────────────────────
+    // MIGRATION v4 — v3.4.1: Employee Caisse Integration & Debt Repayments
+    // ─────────────────────────────────────────────────────────────────
+    {
+      version: 4,
+      name: 'v3_4_1_employee_caisse_and_debt_repayments',
+      description: 'Adds caisse_id & caisse_transaction_id to employee_advances, employee_payments, employee_debts, and creates employee_debt_repayments table',
+      up: (helpers) => {
+        // 1. Column additions for employee_debts
+        helpers.addColumn('employee_debts', 'caisse_id', 'INTEGER REFERENCES caisses(id) ON DELETE SET NULL');
+        helpers.addColumn('employee_debts', 'caisse_transaction_id', 'INTEGER REFERENCES caisse_transactions(id) ON DELETE SET NULL');
+
+        // 2. Column additions for employee_advances
+        helpers.addColumn('employee_advances', 'caisse_id', 'INTEGER REFERENCES caisses(id) ON DELETE SET NULL');
+        helpers.addColumn('employee_advances', 'caisse_transaction_id', 'INTEGER REFERENCES caisse_transactions(id) ON DELETE SET NULL');
+
+        // 3. Column additions for employee_payments
+        helpers.addColumn('employee_payments', 'caisse_id', 'INTEGER REFERENCES caisses(id) ON DELETE SET NULL');
+        helpers.addColumn('employee_payments', 'caisse_transaction_id', 'INTEGER REFERENCES caisse_transactions(id) ON DELETE SET NULL');
+
+        // 4. Create employee_debt_repayments table
+        helpers.addTable('employee_debt_repayments', `CREATE TABLE IF NOT EXISTS employee_debt_repayments (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          debt_id INTEGER NOT NULL,
+          employee_id INTEGER NOT NULL,
+          amount REAL NOT NULL,
+          date TEXT NOT NULL,
+          caisse_id INTEGER REFERENCES caisses(id) ON DELETE SET NULL,
+          caisse_transaction_id INTEGER REFERENCES caisse_transactions(id) ON DELETE SET NULL,
+          payment_method TEXT DEFAULT 'especes',
+          notes TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (debt_id) REFERENCES employee_debts(id) ON DELETE CASCADE,
+          FOREIGN KEY (employee_id) REFERENCES users(id) ON DELETE CASCADE
+        )`);
+
+        // 5. Index for repayments
+        helpers.addIndex(
+          'idx_emp_debt_rep_debt',
+          'CREATE INDEX IF NOT EXISTS idx_emp_debt_rep_debt ON employee_debt_repayments(debt_id)'
+        );
+
+        // 6. Ensure stats summary tables have all required columns for triggers
+        helpers.addColumn('stats_daily_caisses', 'transaction_count', 'INTEGER DEFAULT 0');
+        helpers.addColumn('stats_inventory_summary', 'total_items_count', 'INTEGER DEFAULT 0');
+        helpers.addColumn('stats_inventory_summary', 'total_units_stock', 'REAL DEFAULT 0');
+        helpers.addColumn('stats_inventory_summary', 'total_inventory_valuation_cost', 'REAL DEFAULT 0');
+        helpers.addColumn('stats_inventory_summary', 'total_inventory_valuation_selling', 'REAL DEFAULT 0');
+        helpers.addColumn('stats_inventory_summary', 'potential_margin', 'REAL DEFAULT 0');
       }
     }
   ];
@@ -1107,6 +1259,24 @@ function initDatabase(userDataPath) {
         INSERT OR IGNORE INTO caisse_transaction_categories (name, type, color, icon, is_system, description)
         VALUES ('Règlement Dette Client', 'in', '#16a34a', 'user-check', 1, 'Encaissements des remboursements de dettes clients')
       `).run();
+    }
+  }
+
+  // 4a-bis. Ensure employee-caisse categories exist
+  const employeeCategories = [
+    ['Paiement Salaire', 'out', '#9333ea', 'users', 1, 'Règlement des salaires mensuels des employés'],
+    ['Avance Employé', 'out', '#d97706', 'user-minus', 1, 'Avances sur salaire accordées aux employés'],
+    ['Prêt / Dette Employé', 'out', '#ea580c', 'credit-card', 1, 'Prêts ou dettes accordés aux employés'],
+    ['Règlement Dette Employé', 'in', '#16a34a', 'check-circle', 1, 'Remboursements des dettes par les employés'],
+    ['Remboursement Avance Employé', 'in', '#059669', 'arrow-down-circle', 1, 'Restitutions des avances par les employés']
+  ];
+  for (const cat of employeeCategories) {
+    const has = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = ?").get(cat[0]);
+    if (!has) {
+      db.prepare(`
+        INSERT OR IGNORE INTO caisse_transaction_categories (name, type, color, icon, is_system, description)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(...cat);
     }
   }
 

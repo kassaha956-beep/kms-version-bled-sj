@@ -794,6 +794,21 @@ export const PERMISSION_MODULES: PermissionModule[] = [
           en: 'Track staff personal loans and adjustments',
           ar: 'متابعة الديون والقروض المستحقة على العمال'
         }
+      },
+      {
+        id: 'paiement.attendance',
+        label: 'Gérer le pointage & calendrier des présences',
+        description: 'Pointer les journées complètes, demi-journées et absences',
+        labels: {
+          fr: 'Gérer le pointage & calendrier des présences',
+          en: 'Manage Attendance & Work Calendar',
+          ar: 'تسجيل الحضور والغياب (البوانتاج)'
+        },
+        descriptions: {
+          fr: 'Pointer les journées complètes, demi-journées et absences dans le calendrier',
+          en: 'Track daily attendance, half-days, and absences on calendar',
+          ar: 'تسجيل حضور وغياب وأنصاف أيام عمل الموظفين في الرزنامة'
+        }
       }
     ]
   },
@@ -973,6 +988,55 @@ export const PERMISSION_MODULES: PermissionModule[] = [
         }
       }
     ]
+  },
+  {
+    id: 'expirations',
+    name: 'Dates d\'Expiration & Péremption',
+    description: 'Suivi et alertes des dates de péremption des produits (< 1m, < 2m, < 3m, périmés)',
+    iconName: 'Calendar',
+    badgeColor: '#ea580c',
+    names: {
+      fr: 'Dates d\'Expiration & Péremption',
+      en: 'Expiration Dates & Alerts',
+      ar: 'تواريخ انتهاء الصلاحية والتنبيهات'
+    },
+    descriptions: {
+      fr: 'Suivi et alertes des dates de péremption des produits (< 1m, < 2m, < 3m, périmés)',
+      en: 'Monitor and track product shelf-life and expiration warnings',
+      ar: 'متابعة وتنبيهات تواريخ انتهاء صلاحية السلع والمنتجات'
+    },
+    items: [
+      {
+        id: 'expirations.view',
+        label: 'Voir les alertes de péremption',
+        description: 'Accéder à la page de suivi des dates d\'expiration et alertes',
+        labels: {
+          fr: 'Voir les alertes de péremption',
+          en: 'View Expiration Alerts',
+          ar: 'عرض تنبيهات انتهاء الصلاحية'
+        },
+        descriptions: {
+          fr: 'Accéder à la page de suivi des dates d\'expiration et alertes',
+          en: 'Access the expiration warnings overview page',
+          ar: 'الاطلاع على صفحة تنبيهات السلع المنتهية والقريبة من الانتهاء'
+        }
+      },
+      {
+        id: 'expirations.edit',
+        label: 'Modifier les dates d\'expiration',
+        description: 'Mettre à jour ou corriger la date d\'expiration des articles',
+        labels: {
+          fr: 'Modifier les dates d\'expiration',
+          en: 'Edit Expiration Dates',
+          ar: 'تعديل تواريخ الصلاحية'
+        },
+        descriptions: {
+          fr: 'Mettre à jour ou corriger la date d\'expiration des articles',
+          en: 'Update or correct the expiration date of items',
+          ar: 'تعديل أو تصحيح تاريخ انتهاء الصلاحية للسلع'
+        }
+      }
+    ]
   }
 ];
 
@@ -1026,6 +1090,7 @@ export const ROLE_PRESETS: RolePreset[] = [
       'historique.view',
       'historique.print',
       'products.view',
+      'expirations.view',
       'clients.view',
       'caisses.view',
       'caisses.sessions'
@@ -1186,6 +1251,10 @@ export function hasModuleAccess(user: any, moduleId: string): boolean {
 
   // 'account' tab is always accessible for every logged-in user
   if (moduleId === 'account') return true;
+
+  // 'expirations' module shares access with 'products'
+  if (moduleId === 'expirations') return hasModuleAccess(user, 'products');
+
 
   const perms = normalizePermissions(user.permissions);
   if (perms.includes('*') || perms.includes(moduleId) || perms.includes(`${moduleId}.*`)) {
