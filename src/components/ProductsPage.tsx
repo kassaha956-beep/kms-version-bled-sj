@@ -3,8 +3,11 @@ import { Settings,
   Package, Plus, Search, Edit2, Trash2, ShoppingCart, 
   CheckCircle2, AlertTriangle, AlertCircle, Calendar,
   X, RefreshCw, Building2, Tag,
-  Scale, BarChart2, History, FileText, Eye, Star
+  Scale, BarChart2, History, FileText, Eye, Star, FileSpreadsheet, Download,
+  Barcode
 } from 'lucide-react';
+import ExcelProductImportModal from './ExcelProductImportModal';
+import BarcodeTicketPrintModal from './BarcodeTicketPrintModal';
 import { findMatchingProducts } from '../utils/invoiceMatcher';
 import type { Language, Translations } from '../i18n';
 import { translations } from '../i18n';
@@ -391,6 +394,9 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
 
   // Add / Edit Product modal
   const [isProductModalOpen, setIsProductModalOpen] = useState<boolean>(false);
+  const [isExcelImportModalOpen, setIsExcelImportModalOpen] = useState<boolean>(false);
+  const [isBarcodeTicketModalOpen, setIsBarcodeTicketModalOpen] = useState<boolean>(false);
+  const [barcodePrintProduct, setBarcodePrintProduct] = useState<Product | null>(null);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [productForm, setProductForm] = useState<{
     name: string;
@@ -1419,6 +1425,40 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
     return () => window.removeEventListener('keydown', handleKey);
   }, [isCartOpen, processAchatBarcode]);
 
+  // Export Products to Excel
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const handleExportProductsExcel = async () => {
+    try {
+      setExportingExcel(true);
+      if (window.electronAPI?.exportProductsExcel) {
+        const res = await window.electronAPI.exportProductsExcel({
+          search: search,
+          categoryId: selectedCategory,
+          status: stockStatus
+        });
+        if (res.canceled) return;
+        if (res.success) {
+          setAlert({
+            type: 'success',
+            message: `Catalogue exporté avec succès ! (${res.exportedCount} articles enregistrés dans Excel)`
+          });
+        } else {
+          setAlert({
+            type: 'error',
+            message: res.message || "Échec de l'exportation Excel"
+          });
+        }
+      }
+    } catch (e: any) {
+      setAlert({
+        type: 'error',
+        message: e.message || "Erreur lors de l'exportation Excel"
+      });
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
   // Open Product Modal (Create or Edit)
   const handleOpenProductModal = async (product?: Product) => {
     if (!isAdmin) {
@@ -1812,14 +1852,89 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
           </button>
 
           {isAdmin && (
-            <button
-              type="button"
-              onClick={() => handleOpenProductModal()}
-              className="btn-green"
-              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-            >
-              <Plus size={16} /> {t.addProduct}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleExportProductsExcel}
+                disabled={exportingExcel}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: '#f8fafc',
+                  color: '#0369a1',
+                  border: '1px solid #bae6fd',
+                  borderRadius: '6px',
+                  padding: '8px 14px',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: exportingExcel ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.15s ease'
+                }}
+                title="Exporter la liste des produits filtrée vers un fichier Excel (.xlsx)"
+              >
+                <Download size={16} color="#0284c7" />
+                <span>{exportingExcel ? 'Exportation...' : 'Exporter Excel'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setBarcodePrintProduct(products[0] || null);
+                  setIsBarcodeTicketModalOpen(true);
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: '#f0f9ff',
+                  color: '#0284c7',
+                  border: '1px solid #bae6fd',
+                  borderRadius: '6px',
+                  padding: '8px 14px',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease'
+                }}
+                title="Imprimer des étiquettes code-barres personnalisées"
+              >
+                <Barcode size={16} color="#0284c7" />
+                <span>Étiquettes Code-barres</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsExcelImportModalOpen(true)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: '#f0fdf4',
+                  color: '#15803d',
+                  border: '1px solid #86efac',
+                  borderRadius: '6px',
+                  padding: '8px 14px',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s ease'
+                }}
+                title="Importer des produits en masse depuis un fichier Excel (.xlsx, .xls)"
+              >
+                <FileSpreadsheet size={16} color="#16a34a" />
+                <span>Importer Excel</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleOpenProductModal()}
+                className="btn-green"
+                style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+              >
+                <Plus size={16} /> {t.addProduct}
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -2499,6 +2614,28 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                           >
                             <ShoppingCart size={11} />
                             <span>{t.addPurchaseBtn}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBarcodePrintProduct(product);
+                              setIsBarcodeTicketModalOpen(true);
+                            }}
+                            style={{ 
+                              background: '#f0f9ff', 
+                              border: '1px solid #bae6fd', 
+                              borderRadius: '4px', 
+                              cursor: 'pointer', 
+                              padding: '4px 6px', 
+                              color: '#0284c7',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center'
+                            }}
+                            title="Imprimer étiquettes code-barres"
+                          >
+                            <Barcode size={13} />
                           </button>
 
                           {canEdit && (
@@ -3436,8 +3573,27 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
                     />
                   </div>
                   <div>
-                    <label style={{ fontSize: '12px', fontWeight: 600, color: '#334155', display: 'block', marginBottom: '4px' }}>
-                      Code-barres
+                    <label style={{ fontSize: '12px', fontWeight: 600, color: '#334155', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                      <span>Code-barres</span>
+                      {editingProduct && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBarcodePrintProduct({
+                              ...editingProduct,
+                              barcode: productForm.barcode || editingProduct.barcode,
+                              name: productForm.name || editingProduct.name,
+                              sku: productForm.sku || editingProduct.sku,
+                              selling_price: productForm.selling_price || editingProduct.selling_price
+                            });
+                            setIsBarcodeTicketModalOpen(true);
+                          }}
+                          style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: '#0284c7', fontWeight: 700, padding: 0, display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+                          title="Imprimer étiquette code-barres"
+                        >
+                          <Barcode size={12} /> Imprimer
+                        </button>
+                      )}
                     </label>
                     <input
                       type="text"
@@ -6165,6 +6321,35 @@ export default function ProductsPage({ currentLang, currentUser }: ProductsPageP
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── MODAL IMPORTATION EXCEL (.xlsx / .xls) ── */}
+      {isExcelImportModalOpen && (
+        <ExcelProductImportModal
+          isOpen={isExcelImportModalOpen}
+          onClose={() => setIsExcelImportModalOpen(false)}
+          onSuccess={() => {
+            fetchProducts();
+            window.dispatchEvent(new CustomEvent('products:updated'));
+          }}
+          t={t}
+          isRtl={currentLang === 'ar'}
+        />
+      )}
+
+      {/* ── MODAL IMPRESSION ÉTIQUETTES CODE-BARRES ── */}
+      {isBarcodeTicketModalOpen && (
+        <BarcodeTicketPrintModal
+          isOpen={isBarcodeTicketModalOpen}
+          onClose={() => {
+            setIsBarcodeTicketModalOpen(false);
+            setBarcodePrintProduct(null);
+          }}
+          product={barcodePrintProduct}
+          products={products}
+          t={t}
+          isRtl={currentLang === 'ar'}
+        />
       )}
     </div>
   );

@@ -35,6 +35,8 @@ import appLogo from './assets/app-logo.png';
 import ActivationScreen from './components/ActivationScreen';
 import ExpirationAlertsModal from './components/ExpirationAlertsModal';
 import ExpirationPage from './components/ExpirationPage';
+import OpenCaisseModal from './components/OpenCaisseModal';
+import CloseCaisseModal from './components/CloseCaisseModal';
 import { hasModuleAccess, getPermissionSummary } from './permissions';
 import { translations } from './i18n';
 import type { Language, Translations } from './i18n';
@@ -105,6 +107,13 @@ declare global {
       updateCartOrder: (data: any) => Promise<{ success: boolean; message?: string }>;
       selectAndParseInvoicePdf: () => Promise<{ success: boolean; canceled?: boolean; fileName?: string; filePath?: string; rawText?: string; items?: any[]; message?: string }>;
       parseInvoicePdfBuffer: (base64: string) => Promise<{ success: boolean; rawText?: string; items?: any[]; message?: string }>;
+      selectExcelProductFile?: () => Promise<{ success: boolean; canceled?: boolean; fileName?: string; fileSize?: number; rows?: any[]; message?: string }>;
+      parseExcelProductBuffer?: (data: { base64Data: string; fileName?: string }) => Promise<{ success: boolean; fileName?: string; fileSize?: number; rows?: any[]; message?: string }>;
+      validateExcelProductData?: (rows: any[]) => Promise<{ success: boolean; summary?: any; validatedRows?: any[]; message?: string }>;
+      executeExcelProductImport?: (params: { rows: any[]; existingProductStrategy: 'skip' | 'update' }) => Promise<{ success: boolean; importedCount: number; updatedCount: number; skippedCount: number; failedCount: number; errors: any[]; message?: string }>;
+      downloadExcelProductTemplate?: () => Promise<{ success: boolean; canceled?: boolean; filePath?: string; message?: string }>;
+      exportFailedRowsExcel?: (failedRows: any[]) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; message?: string }>;
+      exportProductsExcel?: (filters?: any) => Promise<{ success: boolean; canceled?: boolean; filePath?: string; exportedCount?: number; message?: string }>;
 
       // Employees & Payroll
       getEmployees: (filters?: any) => Promise<{ success: boolean; employees?: any[]; totalCount?: number; totalPages?: number; page?: number; message?: string }>;
@@ -135,8 +144,12 @@ declare global {
       updateCaisse: (data: any) => Promise<{ success: boolean; message?: string }>;
       deleteCaisse: (id: number) => Promise<{ success: boolean; message?: string }>;
       openCaisseSession: (data: any) => Promise<{ success: boolean; sessionId?: number; message?: string }>;
+      startAllCaisses?: (data?: any) => Promise<{ success: boolean; count?: number; total?: number; message?: string }>;
       closeCaisseSession: (data: any) => Promise<{ success: boolean; discrepancy?: number; difference?: number; actual?: number; expected?: number; message?: string; [key: string]: any }>;
-      getCaisseSessions: (params?: any) => Promise<{ success: boolean; sessions?: any[]; message?: string }>;
+      closeAllCaisses?: (data?: any) => Promise<{ success: boolean; count?: number; results?: any[]; message?: string }>;
+      getCaisseSessions: (params?: any) => Promise<{ success: boolean; sessions?: any[]; stats?: any; pagination?: { totalCount: number; totalPages: number; currentPage: number; limit: number }; message?: string }>;
+      getCaisseSessionDetails?: (id: number) => Promise<{ success: boolean; session?: any; transactions?: any[]; message?: string }>;
+      getActiveCaisseSession?: (params?: any) => Promise<{ success: boolean; activeSession?: any; message?: string }>;
       getCaisseTransactions: (filters?: any) => Promise<{ success: boolean; transactions?: any[]; totalCount?: number; totalPages?: number; currentPage?: number; limit?: number; message?: string }>;
       createCaisseTransaction: (data: any) => Promise<{ success: boolean; id?: number; newBalance?: number; message?: string }>;
       transferCaisse: (data: any) => Promise<{ success: boolean; debitId?: number; creditId?: number; message?: string }>;
@@ -212,6 +225,11 @@ export default function App() {
     { id: 1, username: 'admin', full_name: 'System Administrator', role: 'admin' },
     { id: 2, username: 'manager', full_name: 'Logistics Manager', role: 'manager' }
   ]);
+
+  // Caisse Session State (Mandatory Open on Login & Close on Logout)
+  const [, setActiveCaisseSession] = useState<any>(null);
+  const [showOpenCaisseModal, setShowOpenCaisseModal] = useState<boolean>(false);
+  const [showCloseCaisseModal, setShowCloseCaisseModal] = useState<boolean>(false);
 
   // User & Role Management Modal
   const [showRoleModal, setShowRoleModal] = useState(false);
@@ -434,6 +452,30 @@ export default function App() {
           if (!hasModuleAccess(res.user, activeTab)) {
             const firstAllowed = candidateTabs.find(tab => hasModuleAccess(res.user, tab));
             if (firstAllowed) setActiveTab(firstAllowed);
+          }
+
+          // Check if any caisse is closed - if so, require starting all caisses
+          try {
+            if (window.electronAPI?.getCaisses) {
+              const caissesRes = await window.electronAPI.getCaisses();
+              const hasClosed = caissesRes?.caisses?.some((c: any) => c.status !== 'open');
+              if (hasClosed) {
+                setActiveCaisseSession(null);
+                setShowOpenCaisseModal(true);
+              } else {
+                // All caisses are open, retrieve active session
+                if (window.electronAPI?.getActiveCaisseSession) {
+                  const activeCheck = await window.electronAPI.getActiveCaisseSession({ user_id: res.user.id });
+                  setActiveCaisseSession(activeCheck?.activeSession || null);
+                }
+                setShowOpenCaisseModal(false);
+              }
+            } else {
+              setShowOpenCaisseModal(true);
+            }
+          } catch (sessionErr) {
+            console.error('Error checking caisses status on login:', sessionErr);
+            setShowOpenCaisseModal(true);
           }
         } else {
           setLoginError(res.message || 'Identifiants invalides');
@@ -1107,7 +1149,24 @@ export default function App() {
             </div>
           </div>
           <button 
-            onClick={() => setCurrentUser(null)}
+            onClick={async () => {
+              // Check if any caisse is currently open across the business
+              try {
+                if (window.electronAPI?.getCaisses) {
+                  const check = await window.electronAPI.getCaisses();
+                  const hasOpen = check?.caisses?.some((c: any) => c.status === 'open');
+                  if (hasOpen) {
+                    setShowCloseCaisseModal(true);
+                    return;
+                  }
+                }
+              } catch (e) {
+                console.error('Error verifying open caisses on logout:', e);
+              }
+
+              setCurrentUser(null);
+              setActiveCaisseSession(null);
+            }}
             className="btn-danger"
             style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
           >
@@ -1484,6 +1543,31 @@ export default function App() {
           }}
         />
       )}
+
+      {/* MODAL: OUVERTURE OBLIGATOIRE DE CAISSE À LA CONNEXION */}
+      <OpenCaisseModal
+        isOpen={showOpenCaisseModal}
+        currentUser={currentUser}
+        onCaisseOpened={(session) => {
+          setActiveCaisseSession(session);
+          setShowOpenCaisseModal(false);
+          reloadData();
+        }}
+      />
+
+      {/* MODAL: CLÔTURE OBLIGATOIRE DE TOUTES LES CAISSES À LA DÉCONNEXION */}
+      <CloseCaisseModal
+        isOpen={showCloseCaisseModal}
+        currentUser={currentUser}
+        onCaisseClosed={() => {
+          setShowCloseCaisseModal(false);
+          setActiveCaisseSession(null);
+          setCurrentUser(null);
+        }}
+        onCancel={() => {
+          setShowCloseCaisseModal(false);
+        }}
+      />
     </div>
   );
 }

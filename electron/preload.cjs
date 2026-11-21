@@ -74,6 +74,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   selectAndParseInvoicePdf: () => ipcRenderer.invoke('purchases:selectAndParseInvoicePdf'),
   parseInvoicePdfBuffer: (base64Data) => ipcRenderer.invoke('purchases:parseInvoicePdfBuffer', base64Data),
 
+  // Excel Product Import
+  selectExcelProductFile: () => ipcRenderer.invoke('products:selectExcelFile'),
+  parseExcelProductBuffer: (data) => ipcRenderer.invoke('products:parseExcelBuffer', data),
+  validateExcelProductData: (rows) => ipcRenderer.invoke('products:validateExcelData', rows),
+  executeExcelProductImport: (params) => ipcRenderer.invoke('products:executeExcelImport', params),
+  downloadExcelProductTemplate: () => ipcRenderer.invoke('products:downloadExcelTemplate'),
+  exportFailedRowsExcel: (failedRows) => ipcRenderer.invoke('products:exportFailedRowsExcel', failedRows),
+  exportProductsExcel: (filters) => ipcRenderer.invoke('products:exportProductsExcel', filters),
+
   // Employees & Payroll
   getEmployees: (filters) => ipcRenderer.invoke('employees:getAll', filters),
   getEmployeeById: (id) => ipcRenderer.invoke('employees:getById', id),
@@ -103,8 +112,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateCaisse: (data) => ipcRenderer.invoke('caisses:update', data),
   deleteCaisse: (id) => ipcRenderer.invoke('caisses:delete', id),
   openCaisseSession: (data) => ipcRenderer.invoke('caisses:openSession', data),
+  startAllCaisses: (data) => ipcRenderer.invoke('caisses:startAll', data),
   closeCaisseSession: (data) => ipcRenderer.invoke('caisses:closeSession', data),
+  closeAllCaisses: (data) => ipcRenderer.invoke('caisses:closeAll', data),
   getCaisseSessions: (params) => ipcRenderer.invoke('caisses:getSessions', params),
+  getCaisseSessionDetails: (id) => ipcRenderer.invoke('caisses:getSessionDetails', id),
+  getActiveCaisseSession: (params) => ipcRenderer.invoke('caisses:getActiveSession', params),
   getCaisseTransactions: (filters) => ipcRenderer.invoke('caisses:getTransactions', filters),
   createCaisseTransaction: (data) => ipcRenderer.invoke('caisses:createTransaction', data),
   transferCaisse: (data) => ipcRenderer.invoke('caisses:transfer', data),

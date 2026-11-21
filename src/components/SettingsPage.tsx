@@ -238,6 +238,7 @@ export default function SettingsPage({
     if (window.electronAPI?.saveSettings) {
       await window.electronAPI.saveSettings(payload);
     }
+    window.dispatchEvent(new CustomEvent('settings:updated'));
     showAlert('success', t.save + ' : ' + t.printerHeading);
   };
 
@@ -274,6 +275,7 @@ export default function SettingsPage({
       await window.electronAPI.saveSettings(payload);
     }
     localStorage.setItem('app_store_data', JSON.stringify(storeData));
+    window.dispatchEvent(new CustomEvent('settings:updated'));
     showAlert('success', t.storeSavedSuccess);
   };
 

@@ -65,6 +65,23 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
   // Categories & Sessions
   const [categories, setCategories] = useState<any[]>([]);
   const [sessions, setSessions] = useState<any[]>([]);
+  const [sessionStats, setSessionStats] = useState<any>(null);
+  const [sessionsFilterUser, setSessionsFilterUser] = useState<string>('all');
+  const [sessionsFilterStatus, setSessionsFilterStatus] = useState<'all' | 'open' | 'closed'>('all');
+  const [sessionsFilterDiscrepancy, setSessionsFilterDiscrepancy] = useState<'all' | 'discrepancy' | 'exact'>('all');
+  const [sessionsFilterDatePreset, setSessionsFilterDatePreset] = useState<'all' | 'today' | 'yesterday' | 'this_week' | 'this_month' | 'last_month' | 'custom'>('all');
+  const [sessionsStartDate, setSessionsStartDate] = useState<string>('');
+  const [sessionsEndDate, setSessionsEndDate] = useState<string>('');
+  const [sessionsSearch, setSessionsSearch] = useState<string>('');
+  
+  // Sessions Pagination state
+  const [sessionsPage, setSessionsPage] = useState<number>(1);
+  const [sessionsLimit, setSessionsLimit] = useState<number>(15);
+  const [sessionsTotalPages, setSessionsTotalPages] = useState<number>(1);
+  const [sessionsTotalCount, setSessionsTotalCount] = useState<number>(0);
+
+  // Selected session for standalone details modal (not expanding at bottom)
+  const [selectedSessionModal, setSelectedSessionModal] = useState<any>(null);
 
   // Modals state
   const [showTransactionModal, setShowTransactionModal] = useState(false);
@@ -220,19 +237,38 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
     }
   };
 
-  const loadSessions = async () => {
+  const loadSessions = async (targetPage?: number) => {
     if (!window.electronAPI?.getCaisseSessions) return;
+    const p = targetPage !== undefined ? targetPage : sessionsPage;
     try {
       const res = await window.electronAPI.getCaisseSessions({
         caisse_id: selectedCaisseId !== 'all' ? selectedCaisseId : undefined,
-        limit: 50
+        user_name: sessionsFilterUser !== 'all' ? sessionsFilterUser : undefined,
+        status: sessionsFilterStatus,
+        hasDiscrepancy: sessionsFilterDiscrepancy,
+        datePreset: sessionsFilterDatePreset !== 'all' ? sessionsFilterDatePreset : undefined,
+        startDate: sessionsFilterDatePreset === 'custom' && sessionsStartDate ? sessionsStartDate : undefined,
+        endDate: sessionsFilterDatePreset === 'custom' && sessionsEndDate ? sessionsEndDate : undefined,
+        search: sessionsSearch ? sessionsSearch.trim() : undefined,
+        page: p,
+        limit: sessionsLimit
       });
-      if (res.success && res.sessions) {
-        setSessions(res.sessions);
+      if (res?.success) {
+        if (res.sessions) setSessions(res.sessions);
+        if (res.stats) setSessionStats(res.stats);
+        if (res.pagination) {
+          setSessionsTotalPages(res.pagination.totalPages || 1);
+          setSessionsTotalCount(res.pagination.totalCount || 0);
+          setSessionsPage(res.pagination.currentPage || 1);
+        }
       }
     } catch (err: any) {
       console.error('Error loading sessions:', err);
     }
+  };
+
+  const handleOpenSessionModal = (session: any) => {
+    setSelectedSessionModal(session);
   };
 
   // Initial mount
@@ -247,9 +283,26 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
     if (activeSubTab === 'transactions') {
       loadTransactions(1);
     } else if (activeSubTab === 'sessions') {
-      loadSessions();
+      loadSessions(1);
     }
-  }, [selectedCaisseId, typeFilter, categoryFilter, datePreset, startDate, endDate, pageSize, activeSubTab]);
+  }, [
+    selectedCaisseId,
+    typeFilter,
+    categoryFilter,
+    datePreset,
+    startDate,
+    endDate,
+    pageSize,
+    activeSubTab,
+    sessionsFilterUser,
+    sessionsFilterStatus,
+    sessionsFilterDiscrepancy,
+    sessionsFilterDatePreset,
+    sessionsStartDate,
+    sessionsEndDate,
+    sessionsSearch,
+    sessionsLimit
+  ]);
 
   // Real-time live synchronization (app:refresh & tab activation)
   useEffect(() => {
@@ -437,6 +490,56 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
       notes: ''
     });
     setShowOpenModal(true);
+  };
+
+  const handleStartAllCaisses = async () => {
+    const closedList = caisses.filter(c => c.status !== 'open');
+    if (closedList.length === 0) {
+      setSuccessMsg('Toutes les caisses sont déjà ouvertes !');
+      return;
+    }
+
+    if (!window.confirm(`Voulez-vous vraiment démarrer et ouvrir toutes les caisses (${closedList.length} caisse(s) fermée(s)) ?`)) {
+      return;
+    }
+
+    try {
+      if (window.electronAPI?.flushCache) {
+        await window.electronAPI.flushCache();
+      }
+
+      if (window.electronAPI?.startAllCaisses) {
+        const res = await window.electronAPI.startAllCaisses({
+          user_id: currentUser?.id,
+          user_name: currentUser?.full_name || currentUser?.username || 'Administrateur',
+          notes: 'Ouverture groupée de toutes les caisses'
+        });
+        if (res?.success) {
+          setSuccessMsg(`Succès : ${res.count || closedList.length} caisse(s) ont été démarrées et ouvertes avec succès !`);
+          await Promise.all([loadCaisses(), loadStats(), loadSessions()]);
+          window.dispatchEvent(new CustomEvent('app:refresh'));
+        } else {
+          setErrorMsg(res?.message || 'Erreur lors du démarrage groupé des caisses.');
+        }
+      } else {
+        // Fallback: loop through each closed caisse
+        for (const c of closedList) {
+          await window.electronAPI?.openCaisseSession?.({
+            caisse_id: c.id,
+            user_id: currentUser?.id,
+            user_name: currentUser?.full_name || currentUser?.username || 'Administrateur',
+            opening_balance: Number(c.current_balance) || 0,
+            notes: 'Démarrage groupé'
+          });
+        }
+        setSuccessMsg(`Toutes les caisses ont été ouvertes avec succès !`);
+        await Promise.all([loadCaisses(), loadStats(), loadSessions()]);
+        window.dispatchEvent(new CustomEvent('app:refresh'));
+      }
+    } catch (err: any) {
+      console.error('Error starting all caisses:', err);
+      setErrorMsg(err.message || 'Erreur lors de l’ouverture de toutes les caisses.');
+    }
   };
 
   const handleConfirmOpenCaisse = async (e: React.FormEvent) => {
@@ -799,15 +902,38 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
           )}
 
           {canManageCaisses && (
-            <button 
-              type="button"
-              onClick={handleOpenAddCaisse}
-              className="btn-secondary"
-              style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '9px 14px', fontSize: '13px' }}
-              title="Ajouter une nouvelle caisse"
-            >
-              <Plus size={15} /> Nouvelle Caisse
-            </button>
+            <>
+              <button 
+                type="button"
+                onClick={handleStartAllCaisses}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '9px 14px',
+                  fontSize: '13px',
+                  fontWeight: 800,
+                  borderRadius: '8px',
+                  border: '1px solid #86efac',
+                  background: '#f0fdf4',
+                  color: '#15803d',
+                  cursor: 'pointer'
+                }}
+                title="Démarrer et ouvrir toutes les caisses fermées en un clic"
+              >
+                <Unlock size={15} color="#15803d" /> Démarrer Toutes les Caisses
+              </button>
+
+              <button 
+                type="button"
+                onClick={handleOpenAddCaisse}
+                className="btn-secondary"
+                style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '9px 14px', fontSize: '13px' }}
+                title="Ajouter une nouvelle caisse"
+              >
+                <Plus size={15} /> Nouvelle Caisse
+              </button>
+            </>
           )}
 
           <button 
@@ -1604,95 +1730,411 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
       )}
 
       {/* ========================================================= */}
-      {/* SUB-TAB 4: SESSIONS & CLÔTURES DE CAISSE                  */}
+      {/* SUB-TAB 4: SESSIONS & CLÔTURES DE CAISSE (ARCHIVE ENRICHI) */}
       {/* ========================================================= */}
       {activeSubTab === 'sessions' && (
-        <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
-          <div style={{ marginBottom: '14px' }}>
-            <h3 style={{ fontSize: '15px', fontWeight: 800, color: '#0f172a', margin: 0 }}>
-              Historique des Sessions et Clôtures de Caisse
-            </h3>
-            <p style={{ fontSize: '12px', color: '#64748b', margin: '2px 0 0 0' }}>
-              Traçabilité complète des ouvertures, comptages d'espèces réels et calculs d'écarts de clôture.
-            </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {/* Header & KPI Summary */}
+          <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '16px 20px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' }}>
+              <div>
+                <h3 style={{ fontSize: '16px', fontWeight: 800, color: '#0f172a', margin: 0 }}>
+                  Archives et Historique Détaillé des Sessions de Caisse
+                </h3>
+                <p style={{ fontSize: '12px', color: '#64748b', margin: '2px 0 0 0' }}>
+                  Traçabilité des ouvertures obligatoires, mouvements pendant chaque session, comptages physiques et écarts.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => loadSessions(1)}
+                className="btn-secondary"
+                style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', padding: '6px 12px' }}
+              >
+                <RefreshCw size={13} />
+                <span>Actualiser</span>
+              </button>
+            </div>
+
+            {/* KPI Badges */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '10px 14px' }}>
+                <div style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>Total Sessions</div>
+                <div style={{ fontSize: '18px', fontWeight: 900, color: '#0f172a' }}>
+                  {sessionStats?.total_sessions || sessions.length}
+                </div>
+              </div>
+              <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '10px', padding: '10px 14px' }}>
+                <div style={{ fontSize: '11px', color: '#16a34a', fontWeight: 600 }}>Sessions Actives</div>
+                <div style={{ fontSize: '18px', fontWeight: 900, color: '#16a34a' }}>
+                  {sessionStats?.open_sessions || sessions.filter(s => s.status === 'open').length}
+                </div>
+              </div>
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '10px 14px' }}>
+                <div style={{ fontSize: '11px', color: '#475569', fontWeight: 600 }}>Sessions Clôturées</div>
+                <div style={{ fontSize: '18px', fontWeight: 900, color: '#334155' }}>
+                  {sessionStats?.closed_sessions || sessions.filter(s => s.status === 'closed').length}
+                </div>
+              </div>
+              <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '10px', padding: '10px 14px' }}>
+                <div style={{ fontSize: '11px', color: '#dc2626', fontWeight: 600 }}>Sessions avec Écart</div>
+                <div style={{ fontSize: '18px', fontWeight: 900, color: '#dc2626' }}>
+                  {sessionStats?.sessions_with_discrepancy || sessions.filter(s => s.status === 'closed' && (s.difference || 0) !== 0).length}
+                </div>
+              </div>
+            </div>
           </div>
 
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', textAlign: 'left' }}>
-              <thead>
-                <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0', color: '#475569', fontWeight: 700 }}>
-                  <th style={{ padding: '10px 12px' }}>Caisse</th>
-                  <th style={{ padding: '10px 12px' }}>Caissier / Opérateur</th>
-                  <th style={{ padding: '10px 12px' }}>Ouvert le</th>
-                  <th style={{ padding: '10px 12px' }}>Clôturé le</th>
-                  <th style={{ padding: '10px 12px', textAlign: 'right' }}>Fond Initial</th>
-                  <th style={{ padding: '10px 12px', textAlign: 'right' }}>Attendu</th>
-                  <th style={{ padding: '10px 12px', textAlign: 'right' }}>Compté Réel</th>
-                  <th style={{ padding: '10px 12px', textAlign: 'right' }}>Écart</th>
-                  <th style={{ padding: '10px 12px', textAlign: 'center' }}>Statut</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sessions.length === 0 ? (
-                  <tr>
-                    <td colSpan={9} style={{ textAlign: 'center', padding: '30px', color: '#94a3b8' }}>
-                      Aucune session enregistrée pour l'instant.
-                    </td>
-                  </tr>
-                ) : (
-                  sessions.map(s => {
-                    const isOpen = s.status === 'open';
-                    const diff = s.difference || 0;
+          {/* Filter Bar */}
+          <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: '12px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '10px' }}>
+              {/* Filter Caisse */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+                  Caisse :
+                </label>
+                <select
+                  className="input-clean"
+                  value={selectedCaisseId}
+                  onChange={e => setSelectedCaisseId(e.target.value)}
+                  style={{ width: '100%', fontSize: '12px', padding: '6px 10px' }}
+                >
+                  <option value="all">Toutes les caisses</option>
+                  {caisses.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
 
-                    return (
-                      <tr key={s.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                        <td style={{ padding: '10px 12px', fontWeight: 700, color: '#0f172a' }}>
-                          {s.caisse_name}
-                        </td>
-                        <td style={{ padding: '10px 12px', color: '#475569' }}>
-                          {s.user_name || 'Inconnu'}
-                        </td>
-                        <td style={{ padding: '10px 12px', color: '#64748b' }}>
-                          {s.opened_at}
-                        </td>
-                        <td style={{ padding: '10px 12px', color: '#64748b' }}>
-                          {s.closed_at || '-'}
-                        </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 600 }}>
-                          {formatMoney(s.opening_balance)}
-                        </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 600 }}>
-                          {s.closing_balance_expected !== null ? formatMoney(s.closing_balance_expected) : '-'}
-                        </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#0f172a' }}>
-                          {s.closing_balance_actual !== null ? formatMoney(s.closing_balance_actual) : '-'}
-                        </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 800 }}>
-                          {isOpen ? (
-                            <span style={{ color: '#94a3b8' }}>En cours</span>
-                          ) : diff === 0 ? (
-                            <span style={{ color: '#16a34a' }}>0.00 DA (Parfait)</span>
-                          ) : diff > 0 ? (
-                            <span style={{ color: '#0284c7' }}>+{formatMoney(diff)} (Excédent)</span>
-                          ) : (
-                            <span style={{ color: '#dc2626' }}>{formatMoney(diff)} (Déficit)</span>
-                          )}
-                        </td>
-                        <td style={{ padding: '10px 12px', textAlign: 'center' }}>
-                          <span style={{ 
-                            padding: '3px 8px', borderRadius: '12px', fontSize: '11px', fontWeight: 700,
-                            background: isOpen ? '#dcfce7' : '#f1f5f9',
-                            color: isOpen ? '#15803d' : '#64748b'
-                          }}>
-                            {isOpen ? 'En cours' : 'Clôturée'}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
+              {/* Filter User */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+                  Opérateur / Caissier :
+                </label>
+                <select
+                  className="input-clean"
+                  value={sessionsFilterUser}
+                  onChange={e => setSessionsFilterUser(e.target.value)}
+                  style={{ width: '100%', fontSize: '12px', padding: '6px 10px' }}
+                >
+                  <option value="all">Tous les opérateurs</option>
+                  {Array.from(new Set(sessions.map(s => s.user_name).filter(Boolean))).map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Filter Status */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+                  Statut :
+                </label>
+                <select
+                  className="input-clean"
+                  value={sessionsFilterStatus}
+                  onChange={e => setSessionsFilterStatus(e.target.value as any)}
+                  style={{ width: '100%', fontSize: '12px', padding: '6px 10px' }}
+                >
+                  <option value="all">Toutes (En cours & Clôturées)</option>
+                  <option value="open">🟢 En cours uniquement</option>
+                  <option value="closed">⚪ Clôturées uniquement</option>
+                </select>
+              </div>
+
+              {/* Filter Discrepancy */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+                  Écart de Clôture :
+                </label>
+                <select
+                  className="input-clean"
+                  value={sessionsFilterDiscrepancy}
+                  onChange={e => setSessionsFilterDiscrepancy(e.target.value as any)}
+                  style={{ width: '100%', fontSize: '12px', padding: '6px 10px' }}
+                >
+                  <option value="all">Tous les écarts</option>
+                  <option value="exact">✅ Sans écart (0.00 DA)</option>
+                  <option value="discrepancy">⚠️ Avec écart (Déficit / Excédent)</option>
+                </select>
+              </div>
+
+              {/* Date Preset */}
+              <div>
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>
+                  Période :
+                </label>
+                <select
+                  className="input-clean"
+                  value={sessionsFilterDatePreset}
+                  onChange={e => setSessionsFilterDatePreset(e.target.value as any)}
+                  style={{ width: '100%', fontSize: '12px', padding: '6px 10px' }}
+                >
+                  <option value="all">Toute la période</option>
+                  <option value="today">Aujourd'hui</option>
+                  <option value="yesterday">Hier</option>
+                  <option value="this_week">Cette semaine</option>
+                  <option value="this_month">Ce mois-ci</option>
+                  <option value="last_month">Mois dernier</option>
+                  <option value="custom">Plage personnalisée</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Custom Date Range & Keyword Search */}
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+              {sessionsFilterDatePreset === 'custom' && (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '11px', color: '#64748b' }}>Du:</span>
+                    <input
+                      type="date"
+                      className="input-clean"
+                      value={sessionsStartDate}
+                      onChange={e => setSessionsStartDate(e.target.value)}
+                      style={{ fontSize: '12px', padding: '5px 8px' }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '11px', color: '#64748b' }}>Au:</span>
+                    <input
+                      type="date"
+                      className="input-clean"
+                      value={sessionsEndDate}
+                      onChange={e => setSessionsEndDate(e.target.value)}
+                      style={{ fontSize: '12px', padding: '5px 8px' }}
+                    />
+                  </div>
+                </>
+              )}
+
+              <div style={{ flex: 1, minWidth: '200px' }}>
+                <input
+                  type="text"
+                  className="input-clean"
+                  value={sessionsSearch}
+                  onChange={e => setSessionsSearch(e.target.value)}
+                  placeholder="Rechercher par caissier, note ou caisse..."
+                  style={{ width: '100%', fontSize: '12px', padding: '6px 10px' }}
+                />
+              </div>
+
+              {/* Per Page Selector */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span style={{ fontSize: '11px', color: '#64748b' }}>Afficher :</span>
+                <select
+                  className="input-clean"
+                  value={sessionsLimit}
+                  onChange={e => setSessionsLimit(Number(e.target.value))}
+                  style={{ fontSize: '12px', padding: '5px 8px' }}
+                >
+                  <option value={10}>10 / page</option>
+                  <option value={15}>15 / page</option>
+                  <option value={25}>25 / page</option>
+                  <option value={50}>50 / page</option>
+                </select>
+              </div>
+
+              {(sessionsFilterUser !== 'all' || sessionsFilterStatus !== 'all' || sessionsFilterDiscrepancy !== 'all' || sessionsFilterDatePreset !== 'all' || sessionsSearch) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSessionsFilterUser('all');
+                    setSessionsFilterStatus('all');
+                    setSessionsFilterDiscrepancy('all');
+                    setSessionsFilterDatePreset('all');
+                    setSessionsStartDate('');
+                    setSessionsEndDate('');
+                    setSessionsSearch('');
+                  }}
+                  style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', borderRadius: '6px', padding: '6px 10px', fontSize: '11px', fontWeight: 600, color: '#475569', cursor: 'pointer' }}
+                >
+                  Réinitialiser
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Sessions Archive Table */}
+          <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', textAlign: 'left' }}>
+                <thead>
+                  <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e2e8f0', color: '#475569', fontWeight: 700 }}>
+                    <th style={{ padding: '10px 12px' }}>Caisse</th>
+                    <th style={{ padding: '10px 12px' }}>Opérateur</th>
+                    <th style={{ padding: '10px 12px' }}>Ouverture</th>
+                    <th style={{ padding: '10px 12px' }}>Clôture & Durée</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'right' }}>Fond Initial</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'right' }}>Entrées (+)</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'right' }}>Sorties (-)</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'right' }}>Attendu</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'right' }}>Compté Réel</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'right' }}>Écart</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'center' }}>Statut</th>
+                    <th style={{ padding: '10px 12px', textAlign: 'center' }}>Détails</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sessions.length === 0 ? (
+                    <tr>
+                      <td colSpan={12} style={{ textAlign: 'center', padding: '36px', color: '#94a3b8' }}>
+                        Aucune session de caisse correspondant aux critères.
+                      </td>
+                    </tr>
+                  ) : (
+                    sessions.map(s => {
+                      const isOpen = s.status === 'open';
+                      const diff = s.difference !== undefined && s.difference !== null ? Number(s.difference) : 0;
+                      const totalIn = Number(s.total_in || s.session_in || 0);
+                      const totalOut = Number(s.total_out || s.session_out || 0);
+
+                      return (
+                        <tr
+                          key={s.id}
+                          style={{
+                            borderBottom: '1px solid #f1f5f9',
+                            transition: 'background 0.15s ease'
+                          }}
+                        >
+                          <td style={{ padding: '10px 12px', fontWeight: 800, color: '#0f172a' }}>
+                            {s.caisse_name}
+                          </td>
+                          <td style={{ padding: '10px 12px', color: '#334155', fontWeight: 600 }}>
+                            {s.user_name || s.user_full_name || 'Inconnu'}
+                          </td>
+                          <td style={{ padding: '10px 12px', color: '#64748b' }}>
+                            <div>{s.opened_at ? new Date(s.opened_at).toLocaleDateString('fr-FR') : '-'}</div>
+                            <div style={{ fontSize: '11px', color: '#94a3b8' }}>{s.opened_at ? new Date(s.opened_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : ''}</div>
+                          </td>
+                          <td style={{ padding: '10px 12px', color: '#64748b' }}>
+                            {isOpen ? (
+                              <span style={{ color: '#16a34a', fontWeight: 700 }}>En activité</span>
+                            ) : (
+                              <>
+                                <div>{s.closed_at ? new Date(s.closed_at).toLocaleDateString('fr-FR') : '-'} {s.closed_at ? new Date(s.closed_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : ''}</div>
+                                {s.duration && <div style={{ fontSize: '10px', color: '#0284c7', fontWeight: 600 }}>⏱️ {s.duration}</div>}
+                              </>
+                            )}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#0f172a' }}>
+                            {formatMoney(s.opening_balance)}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#16a34a' }}>
+                            +{formatMoney(totalIn)}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#dc2626' }}>
+                            -{formatMoney(totalOut)}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 700, color: '#334155' }}>
+                            {s.closing_balance_expected !== null && s.closing_balance_expected !== undefined ? formatMoney(s.closing_balance_expected) : '-'}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 800, color: '#0f172a' }}>
+                            {s.closing_balance_actual !== null && s.closing_balance_actual !== undefined ? formatMoney(s.closing_balance_actual) : '-'}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'right', fontWeight: 800 }}>
+                            {isOpen ? (
+                              <span style={{ color: '#94a3b8', fontSize: '11px' }}>En cours</span>
+                            ) : diff === 0 ? (
+                              <span style={{ color: '#16a34a' }}>0.00 DA</span>
+                            ) : diff > 0 ? (
+                              <span style={{ color: '#0284c7' }}>+{formatMoney(diff)}</span>
+                            ) : (
+                              <span style={{ color: '#dc2626' }}>{formatMoney(diff)}</span>
+                            )}
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                            <span style={{
+                              padding: '3px 8px', borderRadius: '12px', fontSize: '11px', fontWeight: 700,
+                              background: isOpen ? '#dcfce7' : '#f1f5f9',
+                              color: isOpen ? '#15803d' : '#64748b'
+                            }}>
+                              {isOpen ? '🟢 En cours' : 'Clôturée'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenSessionModal(s)}
+                              className="btn-secondary"
+                              style={{
+                                padding: '4px 8px',
+                                fontSize: '11px',
+                                fontWeight: 700,
+                                borderRadius: '6px'
+                              }}
+                            >
+                              Détails
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination Controls Bar */}
+            {sessionsTotalPages > 1 && (
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '12px 18px',
+                borderTop: '1px solid #e2e8f0',
+                background: '#f8fafc'
+              }}>
+                <div style={{ fontSize: '12px', color: '#64748b' }}>
+                  Page <strong>{sessionsPage}</strong> sur <strong>{sessionsTotalPages}</strong> ({sessionsTotalCount} sessions au total)
+                </div>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <button
+                    type="button"
+                    disabled={sessionsPage <= 1}
+                    onClick={() => loadSessions(sessionsPage - 1)}
+                    style={{
+                      padding: '6px 12px',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      borderRadius: '6px',
+                      border: '1px solid #cbd5e1',
+                      background: sessionsPage <= 1 ? '#f1f5f9' : '#ffffff',
+                      color: sessionsPage <= 1 ? '#94a3b8' : '#334155',
+                      cursor: sessionsPage <= 1 ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                    &larr; Précédent
+                  </button>
+                  <span style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '0 10px',
+                    fontSize: '12px',
+                    fontWeight: 800,
+                    color: '#0f172a'
+                  }}>
+                    {sessionsPage} / {sessionsTotalPages}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={sessionsPage >= sessionsTotalPages}
+                    onClick={() => loadSessions(sessionsPage + 1)}
+                    style={{
+                      padding: '6px 12px',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      borderRadius: '6px',
+                      border: '1px solid #cbd5e1',
+                      background: sessionsPage >= sessionsTotalPages ? '#f1f5f9' : '#ffffff',
+                      color: sessionsPage >= sessionsTotalPages ? '#94a3b8' : '#334155',
+                      cursor: sessionsPage >= sessionsTotalPages ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                    Suivant &rarr;
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2343,6 +2785,195 @@ export default function CaissesPage({ currentLang, currentUser }: CaissesPagePro
               </div>
             </form>
 
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* MODAL 5: DÉTAILS COMPLETS DE LA SESSION (MODAL FLOTTANT)  */}
+      {/* ========================================================= */}
+      {selectedSessionModal && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(15, 23, 42, 0.75)',
+          backdropFilter: 'blur(5px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+          padding: '16px'
+        }}>
+          <div style={{
+            background: '#ffffff',
+            borderRadius: '16px',
+            maxWidth: '560px',
+            width: '100%',
+            maxHeight: '90vh',
+            boxShadow: '0 25px 50px -12px rgba(0,0,0,0.25)',
+            border: '1px solid #e2e8f0',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column'
+          }}>
+            {/* Modal Header */}
+            <div style={{
+              background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)',
+              padding: '18px 22px',
+              color: '#ffffff',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center'
+            }}>
+              <div>
+                <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0 }}>
+                  Détails de Session #{selectedSessionModal.id}
+                </h3>
+                <p style={{ fontSize: '11px', margin: '2px 0 0 0', color: '#94a3b8' }}>
+                  {selectedSessionModal.caisse_name} ({selectedSessionModal.caisse_code || 'Caisse'})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedSessionModal(null)}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.1)',
+                  border: 'none',
+                  borderRadius: '8px',
+                  width: '30px',
+                  height: '30px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  color: '#cbd5e1'
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '14px', overflowY: 'auto' }}>
+              {/* Operator info card */}
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '12px 14px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                  <div>
+                    <span style={{ fontSize: '11px', color: '#64748b' }}>Ouvert par :</span>
+                    <div style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
+                      {selectedSessionModal.user_name || selectedSessionModal.opening_user_full_name || 'Inconnu'}
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                      📅 {selectedSessionModal.opened_at ? new Date(selectedSessionModal.opened_at).toLocaleString('fr-FR') : '-'}
+                    </div>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '11px', color: '#64748b' }}>Clôturé par :</span>
+                    <div style={{ fontSize: '13px', fontWeight: 800, color: '#0f172a' }}>
+                      {selectedSessionModal.status === 'open' 
+                        ? '🟢 En cours' 
+                        : (selectedSessionModal.closed_by_user_name || selectedSessionModal.closing_user_full_name || selectedSessionModal.user_name || 'Inconnu')}
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>
+                      {selectedSessionModal.status === 'open' 
+                        ? 'Session active' 
+                        : `📅 ${selectedSessionModal.closed_at ? new Date(selectedSessionModal.closed_at).toLocaleString('fr-FR') : '-'}`}
+                    </div>
+                  </div>
+                </div>
+
+                {selectedSessionModal.duration && selectedSessionModal.duration !== '-' && (
+                  <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px solid #e2e8f0', fontSize: '12px', color: '#0284c7', fontWeight: 700 }}>
+                    ⏱️ Durée totale de la session : {selectedSessionModal.duration}
+                  </div>
+                )}
+              </div>
+
+              {/* Financial Breakdown Card */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
+                <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px' }}>
+                  <div style={{ fontSize: '11px', color: '#64748b' }}>Fond initial (Départ)</div>
+                  <div style={{ fontSize: '14px', fontWeight: 800, color: '#0f172a' }}>
+                    {formatMoney(selectedSessionModal.opening_balance)}
+                  </div>
+                </div>
+
+                <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px' }}>
+                  <div style={{ fontSize: '11px', color: '#16a34a' }}>+ Total Entrées (Ventes / Flux)</div>
+                  <div style={{ fontSize: '14px', fontWeight: 800, color: '#16a34a' }}>
+                    +{formatMoney(selectedSessionModal.total_in || selectedSessionModal.session_in || 0)}
+                  </div>
+                </div>
+
+                <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px' }}>
+                  <div style={{ fontSize: '11px', color: '#dc2626' }}>- Total Sorties (Dépenses / Retraits)</div>
+                  <div style={{ fontSize: '14px', fontWeight: 800, color: '#dc2626' }}>
+                    -{formatMoney(selectedSessionModal.total_out || selectedSessionModal.session_out || 0)}
+                  </div>
+                </div>
+
+                <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', padding: '10px 12px' }}>
+                  <div style={{ fontSize: '11px', color: '#1e40af' }}>Solde Théorique Attendu</div>
+                  <div style={{ fontSize: '14px', fontWeight: 800, color: '#1e40af' }}>
+                    {selectedSessionModal.closing_balance_expected !== null && selectedSessionModal.closing_balance_expected !== undefined 
+                      ? formatMoney(selectedSessionModal.closing_balance_expected) 
+                      : formatMoney((Number(selectedSessionModal.opening_balance) || 0) + (Number(selectedSessionModal.total_in || selectedSessionModal.session_in) || 0) - (Number(selectedSessionModal.total_out || selectedSessionModal.session_out) || 0))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Counting & Difference Banner */}
+              {selectedSessionModal.status !== 'open' && (
+                <div style={{
+                  padding: '12px 14px',
+                  borderRadius: '10px',
+                  background: Number(selectedSessionModal.difference || 0) === 0 ? '#f0fdf4' : Number(selectedSessionModal.difference || 0) > 0 ? '#f0f9ff' : '#fef2f2',
+                  border: Number(selectedSessionModal.difference || 0) === 0 ? '1px solid #bbf7d0' : Number(selectedSessionModal.difference || 0) > 0 ? '1px solid #bae6fd' : '1px solid #fecaca',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <div>
+                    <div style={{ fontSize: '11px', color: '#64748b' }}>Montant Réel Compté à la Clôture :</div>
+                    <div style={{ fontSize: '15px', fontWeight: 900, color: '#0f172a' }}>
+                      {formatMoney(selectedSessionModal.closing_balance_actual)}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: '11px', color: '#64748b' }}>Écart de caisse :</div>
+                    <div style={{
+                      fontSize: '15px',
+                      fontWeight: 900,
+                      color: Number(selectedSessionModal.difference || 0) === 0 ? '#15803d' : Number(selectedSessionModal.difference || 0) > 0 ? '#0369a1' : '#b91c1c'
+                    }}>
+                      {Number(selectedSessionModal.difference || 0) === 0 ? '0.00 DA (Parfait)' : (Number(selectedSessionModal.difference || 0) > 0 ? `+${formatMoney(selectedSessionModal.difference)} (Excédent)` : `${formatMoney(selectedSessionModal.difference)} (Déficit)`)}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Notes */}
+              {selectedSessionModal.notes && (
+                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px' }}>
+                  <div style={{ fontSize: '11px', fontWeight: 700, color: '#475569', marginBottom: '2px' }}>Notes de session :</div>
+                  <div style={{ fontSize: '12px', color: '#0f172a', fontStyle: 'italic' }}>
+                    "{selectedSessionModal.notes}"
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div style={{ padding: '14px 20px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-end', background: '#f8fafc' }}>
+              <button
+                type="button"
+                onClick={() => setSelectedSessionModal(null)}
+                className="btn-secondary"
+                style={{ padding: '8px 18px', fontSize: '12px', fontWeight: 700 }}
+              >
+                Fermer
+              </button>
+            </div>
           </div>
         </div>
       )}

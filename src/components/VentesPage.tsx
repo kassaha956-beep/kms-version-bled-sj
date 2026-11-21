@@ -259,6 +259,267 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
   const [posFlexyCustomAmt, setPosFlexyCustomAmt] = useState('');
   const [posCopyMultiplier, setPosCopyMultiplier] = useState(1);
 
+  // Store settings for receipt printing
+  const [storeSettings, setStoreSettings] = useState<{
+    name: string;
+    tagline: string;
+    address: string;
+    city: string;
+    postalCode: string;
+    country: string;
+    phone: string;
+    phone_alt: string;
+    email: string;
+    website: string;
+    rc: string;
+    taxId: string;
+    footer: string;
+    currency: string;
+    paperWidth: '80mm' | '58mm';
+    copies: number;
+    autoCut: boolean;
+    printerTicket: string;
+  }>({
+    name: 'imatechx',
+    tagline: '',
+    address: '',
+    city: '',
+    postalCode: '',
+    country: '',
+    phone: '',
+    phone_alt: '',
+    email: '',
+    website: '',
+    rc: '',
+    taxId: '',
+    footer: 'Merci pour votre visite !',
+    currency: 'DA',
+    paperWidth: '80mm',
+    copies: 1,
+    autoCut: true,
+    printerTicket: ''
+  });
+
+  const loadStoreSettings = useCallback(async () => {
+    let localData: any = null;
+    try {
+      const savedStore = localStorage.getItem('app_store_data');
+      if (savedStore) localData = JSON.parse(savedStore);
+    } catch {}
+
+    if (api?.getSettings) {
+      try {
+        const r = await api.getSettings();
+        if (r?.success && r.settings) {
+          const s = r.settings;
+          setStoreSettings({
+            name: s.store_name || localData?.name || 'imatechx',
+            tagline: s.store_tagline || localData?.tagline || '',
+            address: s.store_address || localData?.address || '',
+            city: s.store_city || localData?.city || '',
+            postalCode: s.store_postal_code || localData?.postalCode || '',
+            country: s.store_country || localData?.country || '',
+            phone: s.store_phone || localData?.phone || '',
+            phone_alt: s.store_phone_alt || localData?.phoneAlt || '',
+            email: s.store_email || localData?.email || '',
+            website: s.store_website || localData?.website || '',
+            rc: s.store_ice || localData?.rc || '',
+            taxId: s.store_tax_id || localData?.taxId || '',
+            footer: s.store_footer_note || localData?.footerNote || 'Merci pour votre visite !',
+            currency: s.store_currency || localData?.currency || 'DA',
+            paperWidth: s.printer_paper === '58mm' ? '58mm' : '80mm',
+            copies: Math.max(1, Math.min(10, Number(s.printer_copies) || 1)),
+            autoCut: s.printer_autocut !== 'false',
+            printerTicket: s.printer_ticket || ''
+          });
+          return;
+        }
+      } catch (err) {
+        console.warn('Failed to load store settings from SQLite API:', err);
+      }
+    }
+
+    if (localData) {
+      setStoreSettings(prev => ({
+        ...prev,
+        name: localData.name || prev.name,
+        tagline: localData.tagline || prev.tagline,
+        address: localData.address || prev.address,
+        city: localData.city || prev.city,
+        postalCode: localData.postalCode || prev.postalCode,
+        country: localData.country || prev.country,
+        phone: localData.phone || prev.phone,
+        phone_alt: localData.phoneAlt || prev.phone_alt,
+        email: localData.email || prev.email,
+        website: localData.website || prev.website,
+        rc: localData.rc || prev.rc,
+        taxId: localData.taxId || prev.taxId,
+        footer: localData.footerNote || prev.footer,
+        currency: localData.currency || prev.currency
+      }));
+    }
+  }, [api]);
+
+  useEffect(() => {
+    loadStoreSettings();
+
+    const handleSettingsUpdated = () => {
+      loadStoreSettings();
+    };
+
+    window.addEventListener('settings:updated', handleSettingsUpdated);
+    window.addEventListener('storage', handleSettingsUpdated);
+    window.addEventListener('focus', handleSettingsUpdated);
+
+    return () => {
+      window.removeEventListener('settings:updated', handleSettingsUpdated);
+      window.removeEventListener('storage', handleSettingsUpdated);
+      window.removeEventListener('focus', handleSettingsUpdated);
+    };
+  }, [loadStoreSettings]);
+
+  // Print thermal receipt ticket in a dedicated popup window using configured settings
+  const printTicket = useCallback((sale: any) => {
+    if (!sale) return;
+
+    const paperW = storeSettings.paperWidth || '80mm';
+    const is58mm = paperW === '58mm';
+    const numCopies = Math.max(1, Math.min(10, storeSettings.copies || 1));
+
+    const fmtAmt = (n: number) =>
+      `${(n || 0).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${storeSettings.currency}`;
+
+    const escapeHtml = (str: any) => {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    };
+
+    const line = (a: string, b: string, bold: boolean = false) =>
+      `<div style="display:flex;justify-content:space-between;margin:2px 0;font-size:${is58mm ? '10px' : '11px'};${bold ? 'font-weight:700;' : ''}"><span>${a}</span><span>${b}</span></div>`;
+
+    const sep = `<div style="border-top:1px dashed #000;margin:6px 0;"></div>`;
+
+    const itemsHtml = (sale.items as CartItem[]).map(it => {
+      const lineTotal = it.selling_price * it.quantity * (1 - it.discount_percent / 100);
+      const disc = it.discount_percent > 0 ? ` (-${it.discount_percent}%)` : '';
+      const unitLabel = it.unit_name ? ` [${escapeHtml(it.unit_name)}]` : '';
+      return line(`${it.quantity}x ${escapeHtml(it.product.name)}${unitLabel}${disc}`, fmtAmt(lineTotal));
+    }).join('');
+
+    // Legal numbers from settings (RC / ICE, NIF/Tax ID)
+    const legalParts: string[] = [];
+    if (storeSettings.rc) legalParts.push(`RC: ${escapeHtml(storeSettings.rc)}`);
+    if (storeSettings.taxId) legalParts.push(`NIF: ${escapeHtml(storeSettings.taxId)}`);
+    const legalHtml = legalParts.length > 0 ? `<div class="small">${legalParts.join(' - ')}</div>` : '';
+
+    // Contact info from settings (email / website)
+    const contactParts: string[] = [];
+    if (storeSettings.email) contactParts.push(escapeHtml(storeSettings.email));
+    if (storeSettings.website) contactParts.push(escapeHtml(storeSettings.website));
+    const contactHtml = contactParts.length > 0 ? `<div class="small">${contactParts.join(' | ')}</div>` : '';
+
+    const singleTicketContent = `
+      <div class="ticket-page">
+        <div class="center">
+          <div class="big">${escapeHtml(storeSettings.name.toUpperCase())}</div>
+          ${storeSettings.tagline ? `<div class="small" style="font-weight:600;margin-top:2px;">${escapeHtml(storeSettings.tagline)}</div>` : ''}
+          ${storeSettings.address ? `<div class="small">${escapeHtml(storeSettings.address)}${storeSettings.city ? ', ' + escapeHtml(storeSettings.city) : ''}</div>` : ''}
+          ${storeSettings.phone ? `<div class="small">📞 ${escapeHtml(storeSettings.phone)}${storeSettings.phone_alt ? ' / ' + escapeHtml(storeSettings.phone_alt) : ''}</div>` : ''}
+          ${contactHtml}
+          ${legalHtml}
+        </div>
+        ${sep}
+        <div style="font-size:${is58mm ? '9px' : '10px'};">
+          <div style="display:flex;justify-content:space-between;">
+            <span>${escapeHtml(t.posReceipt)} <strong>#${escapeHtml(sale.saleNumber)}</strong></span>
+            <span>${escapeHtml(sale.date || '')}</span>
+          </div>
+          ${sale.user ? `<div>Vendeur : <strong>${escapeHtml(sale.user.full_name || sale.user.username)}</strong></div>` : ''}
+          ${sale.client ? `<div>Client : <strong>${escapeHtml(sale.client.name)}</strong></div>` : ''}
+        </div>
+        ${sep}
+        <div class="items-list">
+          ${itemsHtml}
+        </div>
+        ${sep}
+        ${sale.totalDiscount > 0 ? line('Remise totale', `- ${fmtAmt(sale.totalDiscount)}`) : ''}
+        <div class="total-row"><span>${escapeHtml(t.total)}</span><span>${fmtAmt(sale.totalAmount)}</span></div>
+        ${sale.cashRcv > 0 ? line(escapeHtml(t.methodCash), fmtAmt(sale.cashRcv)) : ''}
+        ${sale.changeReturned > 0 ? line(escapeHtml(t.posChangeReturned), fmtAmt(sale.changeReturned), true) : ''}
+        ${sale.creditAmount > 0 ? `<div style="display:flex;justify-content:space-between;font-size:${is58mm ? '10px' : '11px'};color:#b00;font-weight:700;"><span>${escapeHtml(t.histColCredit)}</span><span>${fmtAmt(sale.creditAmount)}</span></div>` : ''}
+        ${sep}
+        ${storeSettings.footer ? `<div class="center small" style="margin-top:6px;font-style:italic;">${escapeHtml(storeSettings.footer)}</div>` : ''}
+      </div>
+    `;
+
+    const allTicketsHtml = Array(numCopies).fill(singleTicketContent).join('\n');
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Ticket #${escapeHtml(sale.saleNumber)}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Courier New', Courier, monospace;
+      width: ${paperW};
+      padding: ${is58mm ? '2mm' : '4mm'};
+      color: #000000;
+      font-size: ${is58mm ? '10px' : '11px'};
+      background: #ffffff;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .ticket-page {
+      width: 100%;
+      page-break-after: ${numCopies > 1 ? 'always' : 'auto'};
+      padding-bottom: 4mm;
+    }
+    .center { text-align: center; }
+    .bold { font-weight: 700; }
+    .big { font-size: ${is58mm ? '13px' : '16px'}; font-weight: 900; letter-spacing: 0.02em; }
+    .small { font-size: ${is58mm ? '8.5px' : '9.5px'}; color: #222222; margin-top: 1px; }
+    .total-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: ${is58mm ? '12px' : '14px'};
+      font-weight: 900;
+      margin: 4px 0;
+    }
+    @media print {
+      body { margin: 0; padding: ${is58mm ? '1mm' : '2mm'}; }
+      @page { margin: 0; size: ${paperW} auto; }
+    }
+  </style>
+</head>
+<body>
+  ${allTicketsHtml}
+  <script>
+    window.onload = function() {
+      window.print();
+      setTimeout(function() {
+        window.close();
+      }, 500);
+    };
+  </script>
+</body>
+</html>`;
+
+    const popupW = is58mm ? 320 : 380;
+    const w = window.open('', '_blank', `width=${popupW},height=620,toolbar=0,menubar=0,scrollbars=1`);
+    if (w) {
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+    }
+  }, [storeSettings, t]);
+
   // Load configured service prices
   useEffect(() => {
     if (api?.getServicesSettings) {
@@ -847,7 +1108,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
   const creditAmount = Math.max(0, totalAmount - cashRcv);
   const changeReturned = Math.max(0, cashRcv - totalAmount);
 
-  const handleConfirmSale = async (mode: 'cash'|'credit'|'partial') => {
+  const handleConfirmSale = async (mode: 'cash'|'credit'|'partial', autoPrint: boolean = false) => {
     if (cart.length === 0) {
       showToast('Le panier est vide', 'error');
       return;
@@ -909,7 +1170,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
 
       if (res?.success) {
         sound.chime();
-        setLastSale({
+        const saleData = {
           saleNumber: res.saleNumber,
           date: new Date().toLocaleString(currentLang === 'ar' ? 'ar-DZ' : currentLang === 'en' ? 'en-US' : 'fr-FR'),
           totalAmount,
@@ -922,7 +1183,8 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
           items: [...cart],
           grossProfit,
           user: currentUser
-        });
+        };
+        setLastSale(saleData);
         setCart([]);
         setSelectedClient(null);
         setLastScannedDisplay(null);
@@ -930,8 +1192,15 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
         setCheckoutNotes('');
         setShowAdvancedCheckout(false);
         setShowCreditModal(false);
+        setShowReceiptModal(false);
+        if (autoPrint) {
+          printTicket(saleData);
+        }
         showToast(`Vente ${res.saleNumber} encaissée — ${fmt(totalAmount)}`, 'success');
         loadProducts();
+        setTimeout(() => {
+          barcodeInputRef.current?.focus();
+        }, 50);
       } else {
         showToast(res?.message || 'Erreur lors de la validation', 'error');
       }
@@ -1065,6 +1334,17 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
         }
         return;
       }
+      if (e.key === 'F11') {
+        e.preventDefault();
+        if (cart.length > 0) {
+          // Checkout + auto-print ticket (no modal)
+          handleConfirmSale('cash', true);
+        } else if (lastSale) {
+          // Reprint last ticket
+          printTicket(lastSale);
+        }
+        return;
+      }
       if (e.key === 'Escape') {
         if (showCreditModal) setShowCreditModal(false);
         else if (showAdvancedCheckout) setShowAdvancedCheckout(false);
@@ -1087,7 +1367,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
     };
     window.addEventListener('keydown', kd);
     return () => window.removeEventListener('keydown', kd);
-  }, [cart, heldCarts, heldCartCounter, selectedClient, showAdvancedCheckout, showReceiptModal, showCreditModal, prodSearch, totalAmount, lastSelectedItem, isActive]);
+  }, [cart, heldCarts, heldCartCounter, selectedClient, showAdvancedCheckout, showReceiptModal, showCreditModal, prodSearch, totalAmount, lastSelectedItem, isActive, lastSale, printTicket]);
 
   const lastIsCig = lastSelectedItem && isCigaretteProduct(lastSelectedItem.product);
 
@@ -1223,8 +1503,18 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
             { key: 'F5', label: t.posTigePackKbd, hl: !!lastIsCig },
             { key: 'Shift', label: 'Qté', hl: true, onClick: focusLastQty },
             { key: 'F6', label: 'Attente' },
-            { key: 'F7', label: t.posCheckoutKbd, green: true },
-            { key: 'F8', label: t.posDebtKbd }
+            { key: 'F7', label: t.posCheckoutKbd, green: true, onClick: () => { if (cart.length > 0) handleConfirmSale('cash'); } },
+            { key: 'F8', label: t.posDebtKbd },
+            { 
+              key: 'F11', 
+              label: cart.length > 0 ? 'Encaisser+Ticket' : t.posPrint, 
+              hl: !!lastSale || cart.length > 0, 
+              green: cart.length > 0,
+              onClick: () => {
+                if (cart.length > 0) handleConfirmSale('cash', true);
+                else if (lastSale) printTicket(lastSale);
+              }
+            }
           ].map(s => (
             <span
               key={s.key}
@@ -3037,8 +3327,11 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
             fontFamily: 'monospace'
           }}>
             <div style={{ textAlign: 'center', marginBottom: '12px' }}>
-              <div style={{ fontSize: '15px', fontWeight: 900 }}>IMATECHX</div>
-              <div style={{ fontSize: '11px', color: '#475569' }}>{t.posReceipt} #{lastSale.saleNumber}</div>
+              <div style={{ fontSize: '15px', fontWeight: 900 }}>{storeSettings.name.toUpperCase()}</div>
+              {storeSettings.tagline && <div style={{ fontSize: '10px', color: '#64748b' }}>{storeSettings.tagline}</div>}
+              {storeSettings.address && <div style={{ fontSize: '10px', color: '#64748b' }}>{storeSettings.address}{storeSettings.city ? ', ' + storeSettings.city : ''}</div>}
+              {storeSettings.phone && <div style={{ fontSize: '10px', color: '#64748b' }}>📞 {storeSettings.phone}</div>}
+              <div style={{ fontSize: '11px', color: '#475569', marginTop: '6px', fontWeight: 700 }}>{t.posReceipt} #{lastSale.saleNumber}</div>
               <div style={{ fontSize: '10px', color: '#64748b' }}>{lastSale.date}</div>
             </div>
 
@@ -3081,7 +3374,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
                 {t.clientConcerned} : {lastSale.client.name}
               </div>
             )}
-            <div style={{ fontSize: '9px', color: '#94a3b8', marginTop: '10px', textAlign: 'center' }}>{t.posThankYou}</div>
+            <div style={{ fontSize: '9px', color: '#64748b', marginTop: '10px', textAlign: 'center', fontStyle: 'italic' }}>{storeSettings.footer || t.posThankYou}</div>
 
             <div style={{ display: 'flex', gap: '8px', marginTop: '14px' }}>
               <button
@@ -3091,7 +3384,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
                 {t.close}
               </button>
               <button
-                onClick={() => window.print()}
+                onClick={() => printTicket(lastSale)}
                 style={{
                   flex: 1,
                   padding: '8px',
@@ -3107,7 +3400,7 @@ export default function VentesPage({ currentLang, currentUser, isActive = true }
                   gap: '5px'
                 }}
               >
-                <Printer size={13}/> {t.posPrint}
+                <Printer size={13}/> {t.posPrint} <kbd style={{ background: 'rgba(255,255,255,0.2)', borderRadius: '3px', padding: '0 3px', fontSize: '9px', fontFamily: 'monospace' }}>F11</kbd>
               </button>
             </div>
           </div>

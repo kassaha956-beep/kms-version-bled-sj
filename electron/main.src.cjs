@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const { app, BrowserWindow, ipcMain, Menu, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const XLSX = require('xlsx');
 
 function loadInternalModule(baseName) {
   const jscPath = path.join(__dirname, `${baseName}.jsc`);
@@ -55,6 +56,21 @@ function createWindow() {
   });
 
   mainWindow.setMenu(null);
+
+  // Enable DevTools shortcut (Ctrl+Shift+I or F12) in development for easy inspection
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'F12' || (input.control && input.shift && input.key.toLowerCase() === 'i')) {
+      mainWindow.webContents.toggleDevTools();
+      event.preventDefault();
+    }
+  });
+
+  // Catch unhandled renderer errors and log to stdout
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    if (level >= 2) {
+      console.error(`[Renderer Console] (${sourceId}:${line}): ${message}`);
+    }
+  });
 
   const devUrl = 'http://localhost:5173';
   const distHtml = path.join(__dirname, '../dist/index.html');
@@ -2153,6 +2169,790 @@ function setupIpcHandlers() {
     }
   });
 
+  // ========================================================
+  // EXCEL PRODUCT IMPORT MODULE (SHEETJS + VALIDATION + TX)
+  // ========================================================
+
+  // Helper to normalize keys (remove accents, lowercase, remove special chars)
+  function normalizeExcelHeader(str) {
+    if (!str || typeof str !== 'string') return '';
+    return str
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]/g, '');
+  }
+
+  // Parse raw sheet rows into structured product records
+  function parseExcelBuffer(buffer) {
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    const firstSheetName = workbook.SheetNames[0];
+    if (!firstSheetName) {
+      throw new Error('Le fichier Excel ne contient aucune feuille.');
+    }
+    const worksheet = workbook.Sheets[firstSheetName];
+    const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+    if (!rawRows || rawRows.length === 0) {
+      throw new Error('Le fichier Excel est complètement vide.');
+    }
+
+    // Locate header row (first non-empty row)
+    let headerRowIdx = -1;
+    for (let i = 0; i < rawRows.length; i++) {
+      if (rawRows[i] && rawRows[i].some(cell => String(cell).trim() !== '')) {
+        headerRowIdx = i;
+        break;
+      }
+    }
+    if (headerRowIdx === -1) {
+      throw new Error('Aucune ligne d\'en-tête trouvée dans le fichier Excel.');
+    }
+
+    const headers = rawRows[headerRowIdx].map(h => normalizeExcelHeader(String(h)));
+    
+    // Map column indices by aliases
+    const colMap = {
+      name: -1,
+      barcode: -1,
+      category: -1,
+      cost_price: -1,
+      selling_price: -1,
+      stock_quantity: -1,
+      min_stock_alert: -1,
+      base_unit: -1,
+      description: -1,
+      expiration_date: -1
+    };
+
+    headers.forEach((h, idx) => {
+      if (/^(nom|nomduproduit|article|designation|libelle|productname|name)$/.test(h)) colMap.name = idx;
+      else if (/^(codebarre|codebarres|barcode|gencod|cb|ean|ean13)$/.test(h)) colMap.barcode = idx;
+      else if (/^(categorie|famille|category|cat)$/.test(h)) colMap.category = idx;
+      else if (/^(prixachat|cout|costprice|pa|prixdachat|purchaseprice|cost)$/.test(h)) colMap.cost_price = idx;
+      else if (/^(prixvente|pv|sellingprice|prix|price|prixdevente)$/.test(h)) colMap.selling_price = idx;
+      else if (/^(quantite|qte|stock|stockinitial|qty|quantity)$/.test(h)) colMap.stock_quantity = idx;
+      else if (/^(stockmin|stockminimal|stockalerte|minstock|alertstock|minstockalert)$/.test(h)) colMap.min_stock_alert = idx;
+      else if (/^(unite|unitedebase|unit|baseunit)$/.test(h)) colMap.base_unit = idx;
+      else if (/^(description|notes|remarque|obs|observation)$/.test(h)) colMap.description = idx;
+      else if (/^(dateexpiration|expiration|peremption|expiry|expdate)$/.test(h)) colMap.expiration_date = idx;
+    });
+
+    if (colMap.name === -1) {
+      throw new Error('Colonne obligatoire introuvable : "Nom du produit" (ou "Désignation", "Article", "Name").');
+    }
+
+    const rows = [];
+    for (let r = headerRowIdx + 1; r < rawRows.length; r++) {
+      const row = rawRows[r];
+      if (!row || row.every(cell => String(cell).trim() === '')) {
+        continue; // skip blank row
+      }
+
+      const getVal = (idx) => (idx !== -1 && row[idx] !== undefined ? String(row[idx]).trim() : '');
+      const getNum = (idx, fallback = 0) => {
+        if (idx === -1 || row[idx] === undefined) return fallback;
+        const raw = String(row[idx]).replace(/\s/g, '').replace(',', '.');
+        const num = parseFloat(raw);
+        return isNaN(num) ? fallback : num;
+      };
+
+      rows.push({
+        excelRowNumber: r + 1,
+        name: getVal(colMap.name),
+        barcode: getVal(colMap.barcode),
+        category: getVal(colMap.category),
+        cost_price: getNum(colMap.cost_price, 0),
+        selling_price: getNum(colMap.selling_price, 0),
+        stock_quantity: getNum(colMap.stock_quantity, 0),
+        min_stock_alert: getNum(colMap.min_stock_alert, 5),
+        base_unit: getVal(colMap.base_unit) || 'pièce',
+        description: getVal(colMap.description),
+        expiration_date: getVal(colMap.expiration_date),
+        rawCostStr: idxToStr(row, colMap.cost_price),
+        rawSellStr: idxToStr(row, colMap.selling_price),
+        rawQtyStr: idxToStr(row, colMap.stock_quantity),
+        rawMinStr: idxToStr(row, colMap.min_stock_alert)
+      });
+    }
+
+    return rows;
+  }
+
+  function idxToStr(row, idx) {
+    if (idx === -1 || row[idx] === undefined || row[idx] === null) return '';
+    return String(row[idx]).trim();
+  }
+
+  // 1. IPC: Select Excel File via Native Dialog
+  ipcMain.handle('products:selectExcelFile', async () => {
+    try {
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: 'Sélectionner un fichier Excel de produits',
+        filters: [
+          { name: 'Fichiers Excel (*.xlsx, *.xls)', extensions: ['xlsx', 'xls'] }
+        ],
+        properties: ['openFile']
+      });
+
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+        return { canceled: true };
+      }
+
+      const filePath = result.filePaths[0];
+      const stats = fs.statSync(filePath);
+      if (stats.size > 25 * 1024 * 1024) {
+        return { success: false, message: 'Le fichier dépasse la limite autorisée de 25 Mo.' };
+      }
+
+      const buffer = fs.readFileSync(filePath);
+      const rows = parseExcelBuffer(buffer);
+
+      return {
+        success: true,
+        fileName: path.basename(filePath),
+        fileSize: stats.size,
+        rows
+      };
+    } catch (err) {
+      console.error('Error in products:selectExcelFile:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // 2. IPC: Parse Drag-and-Drop or Buffered Excel File
+  ipcMain.handle('products:parseExcelBuffer', async (event, { base64Data, fileName }) => {
+    try {
+      if (!base64Data) {
+        return { success: false, message: 'Données de fichier manquantes.' };
+      }
+      const buffer = Buffer.from(base64Data, 'base64');
+      if (buffer.length > 25 * 1024 * 1024) {
+        return { success: false, message: 'Le fichier dépasse la taille maximale autorisée de 25 Mo.' };
+      }
+
+      const rows = parseExcelBuffer(buffer);
+      return {
+        success: true,
+        fileName: fileName || 'fichier-excel.xlsx',
+        fileSize: buffer.length,
+        rows
+      };
+    } catch (err) {
+      console.error('Error in products:parseExcelBuffer:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // 3. IPC: Validate Excel Rows against Database Rules
+  ipcMain.handle('products:validateExcelData', async (event, rows) => {
+    try {
+      if (!Array.isArray(rows)) {
+        return { success: false, message: 'Format des lignes invalide.' };
+      }
+
+      // Preload database state for fast in-memory validation
+      const existingProducts = db.prepare('SELECT id, name, sku, barcode, cost_price, selling_price, stock_quantity, min_stock_alert, category_id, base_unit FROM products').all();
+      const existingCategories = db.prepare('SELECT id, name FROM categories').all();
+
+      const prodByBarcode = new Map();
+      const prodByName = new Map();
+
+      for (const p of existingProducts) {
+        if (p.barcode && String(p.barcode).trim()) {
+          prodByBarcode.set(String(p.barcode).trim().toLowerCase(), p);
+        }
+        if (p.name && String(p.name).trim()) {
+          prodByName.set(String(p.name).trim().toLowerCase(), p);
+        }
+      }
+
+      const catByName = new Map();
+      for (const c of existingCategories) {
+        catByName.set(String(c.name).trim().toLowerCase(), c);
+      }
+
+      const fileBarcodes = new Map(); // barcode -> first occurrence row number
+      const validatedRows = [];
+
+      let validCount = 0;
+      let errorCount = 0;
+      let duplicateInFileCount = 0;
+      let existingInDbCount = 0;
+
+      for (const row of rows) {
+        const errors = [];
+        const warnings = [];
+        let status = 'valid'; // 'valid' | 'error' | 'duplicate_in_file' | 'existing_in_db'
+        let existingMatch = null;
+
+        // Validation A: Product Name (Required)
+        if (!row.name || !String(row.name).trim()) {
+          errors.push('Nom du produit obligatoire manquant.');
+        }
+
+        // Validation B: Selling price cannot be negative
+        if (row.rawSellStr !== '') {
+          const sPrice = parseFloat(String(row.rawSellStr).replace(',', '.'));
+          if (isNaN(sPrice) || sPrice < 0) {
+            errors.push('Prix de vente invalide ou négatif.');
+          }
+        }
+
+        // Validation C: Cost price cannot be negative
+        if (row.rawCostStr !== '') {
+          const cPrice = parseFloat(String(row.rawCostStr).replace(',', '.'));
+          if (isNaN(cPrice) || cPrice < 0) {
+            errors.push('Prix d\'achat invalide ou négatif.');
+          }
+        }
+
+        // Validation D: Quantity cannot be negative
+        if (row.rawQtyStr !== '') {
+          const qty = parseFloat(String(row.rawQtyStr).replace(',', '.'));
+          if (isNaN(qty) || qty < 0) {
+            errors.push('Quantité en stock invalide ou négative.');
+          }
+        }
+
+        // Validation E: Min Stock alert cannot be negative
+        if (row.rawMinStr !== '') {
+          const mAlert = parseFloat(String(row.rawMinStr).replace(',', '.'));
+          if (isNaN(mAlert) || mAlert < 0) {
+            errors.push('Stock minimum d\'alerte invalide ou négatif.');
+          }
+        }
+
+        // Validation F: Barcode duplicates inside file
+        const cleanBc = row.barcode ? String(row.barcode).trim() : '';
+        if (cleanBc) {
+          const bcLower = cleanBc.toLowerCase();
+          if (fileBarcodes.has(bcLower)) {
+            const firstRow = fileBarcodes.get(bcLower);
+            errors.push(`Code-barres en double dans le fichier Excel (déjà présent ligne ${firstRow}).`);
+            status = 'duplicate_in_file';
+            duplicateInFileCount++;
+          } else {
+            fileBarcodes.set(bcLower, row.excelRowNumber);
+          }
+        }
+
+        // Validation G: Match with existing products in database
+        if (cleanBc && prodByBarcode.has(cleanBc.toLowerCase())) {
+          existingMatch = prodByBarcode.get(cleanBc.toLowerCase());
+        } else if (row.name && prodByName.has(String(row.name).trim().toLowerCase())) {
+          existingMatch = prodByName.get(String(row.name).trim().toLowerCase());
+        }
+
+        if (existingMatch && errors.length === 0) {
+          status = 'existing_in_db';
+          existingInDbCount++;
+          warnings.push(`Existe déjà en base (ID: ${existingMatch.id}, SKU: ${existingMatch.sku}).`);
+        }
+
+        // Category matching warning (will be auto-created if new)
+        const cleanCat = row.category ? String(row.category).trim() : '';
+        let matchedCat = null;
+        if (cleanCat) {
+          matchedCat = catByName.get(cleanCat.toLowerCase());
+          if (!matchedCat) {
+            warnings.push(`Catégorie "${cleanCat}" inexistante — sera créée automatiquement.`);
+          }
+        }
+
+        if (errors.length > 0) {
+          status = 'error';
+          errorCount++;
+        } else if (status === 'valid') {
+          validCount++;
+        }
+
+        validatedRows.push({
+          ...row,
+          status,
+          errors,
+          warnings,
+          existingMatch: existingMatch ? {
+            id: existingMatch.id,
+            name: existingMatch.name,
+            sku: existingMatch.sku,
+            barcode: existingMatch.barcode,
+            stock_quantity: existingMatch.stock_quantity,
+            cost_price: existingMatch.cost_price,
+            selling_price: existingMatch.selling_price
+          } : null,
+          categoryMatched: matchedCat ? matchedCat.name : cleanCat
+        });
+      }
+
+      return {
+        success: true,
+        summary: {
+          totalRows: rows.length,
+          validCount,
+          errorCount,
+          duplicateInFileCount,
+          existingInDbCount
+        },
+        validatedRows
+      };
+    } catch (err) {
+      console.error('Error in products:validateExcelData:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // 4. IPC: Execute Confirmed Product Import within atomic database transaction
+  ipcMain.handle('products:executeExcelImport', async (event, { rows, existingProductStrategy }) => {
+    try {
+      // Check activation product limit
+      const limitCheck = checkProductLimit(db);
+      if (!limitCheck.allowed) {
+        return { success: false, message: limitCheck.error };
+      }
+
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return { success: false, message: 'Aucune donnée à importer.' };
+      }
+
+      // Valid strategies: 'skip' | 'update' | 'error'
+      const strategy = existingProductStrategy || 'skip';
+
+      const results = {
+        success: true,
+        importedCount: 0,
+        updatedCount: 0,
+        skippedCount: 0,
+        failedCount: 0,
+        errors: []
+      };
+
+      const importTx = db.transaction(() => {
+        // Pre-query categories and max SKU
+        const categories = db.prepare('SELECT id, name FROM categories').all();
+        const catMap = new Map();
+        for (const c of categories) {
+          catMap.set(c.name.trim().toLowerCase(), c.id);
+        }
+
+        const insertCatStmt = db.prepare('INSERT INTO categories (name, code, color, icon) VALUES (?, ?, ?, ?)');
+
+        // Prepare SKU sequence
+        const lastRow = db.prepare("SELECT sku FROM products WHERE sku LIKE 'SKU-%' ORDER BY CAST(SUBSTR(sku,5) AS INTEGER) DESC LIMIT 1").get();
+        let seq = 1000;
+        if (lastRow) {
+          const n = parseInt(lastRow.sku.replace('SKU-', '')) || 0;
+          if (n >= seq) seq = n + 1;
+        }
+
+        const insertProdStmt = db.prepare(`
+          INSERT INTO products (
+            name, sku, barcode, category_id, base_unit,
+            stock_quantity, min_stock_alert, cost_price, selling_price,
+            status, is_favorite, notes, date_expiration
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?)
+        `);
+
+        const insertUnitStmt = db.prepare(`
+          INSERT INTO product_units (product_id, unit_name, conversion_factor, selling_price, cost_price, is_default)
+          VALUES (?, ?, 1, ?, ?, 1)
+        `);
+
+        const updateProdStmt = db.prepare(`
+          UPDATE products
+          SET 
+            name = ?,
+            barcode = COALESCE(NULLIF(?, ''), barcode),
+            category_id = COALESCE(?, category_id),
+            base_unit = COALESCE(NULLIF(?, ''), base_unit),
+            min_stock_alert = ?,
+            cost_price = ?,
+            selling_price = ?,
+            notes = CASE WHEN ? != '' THEN ? ELSE notes END,
+            date_expiration = CASE WHEN ? != '' THEN ? ELSE date_expiration END,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `);
+
+        const updateBaseUnitStmt = db.prepare(`
+          UPDATE product_units
+          SET selling_price = ?, cost_price = ?, unit_name = COALESCE(NULLIF(?, ''), unit_name)
+          WHERE product_id = ? AND is_default = 1
+        `);
+
+        for (const row of rows) {
+          // If row marked as error, skip and record failure
+          if (row.status === 'error' || (Array.isArray(row.errors) && row.errors.length > 0)) {
+            results.failedCount++;
+            results.errors.push({
+              excelRowNumber: row.excelRowNumber,
+              name: row.name || 'Sans nom',
+              barcode: row.barcode || '',
+              reason: row.errors && row.errors.length > 0 ? row.errors.join(' | ') : 'Ligne marquée invalide'
+            });
+            continue;
+          }
+
+          // Handle Category: find or create
+          let catId = null;
+          const cleanCat = row.category ? String(row.category).trim() : '';
+          if (cleanCat) {
+            const catKey = cleanCat.toLowerCase();
+            if (catMap.has(catKey)) {
+              catId = catMap.get(catKey);
+            } else {
+              const code = cleanCat.toUpperCase().slice(0, 8);
+              const newCat = insertCatStmt.run(cleanCat, code, '#16a34a', 'tag');
+              catId = newCat.lastInsertRowid;
+              catMap.set(catKey, catId);
+            }
+          }
+
+          // Check if product already exists (by barcode or name)
+          const cleanBc = row.barcode ? String(row.barcode).trim() : '';
+          let existing = null;
+          if (cleanBc) {
+            existing = db.prepare('SELECT id, name, sku, stock_quantity FROM products WHERE barcode = ?').get(cleanBc);
+          }
+          if (!existing && row.name && String(row.name).trim()) {
+            existing = db.prepare('SELECT id, name, sku, stock_quantity FROM products WHERE LOWER(name) = LOWER(?)').get(String(row.name).trim());
+          }
+
+          if (existing) {
+            if (strategy === 'skip') {
+              results.skippedCount++;
+              continue;
+            } else if (strategy === 'update') {
+              // Update existing product without overriding current stock quantity unintentionally
+              updateProdStmt.run(
+                row.name.trim(),
+                cleanBc,
+                catId,
+                row.base_unit || 'pièce',
+                parseFloat(row.min_stock_alert) || 5,
+                parseFloat(row.cost_price) || 0,
+                parseFloat(row.selling_price) || 0,
+                row.description || '',
+                row.description || '',
+                row.expiration_date || '',
+                row.expiration_date || '',
+                existing.id
+              );
+
+              updateBaseUnitStmt.run(
+                parseFloat(row.selling_price) || 0,
+                parseFloat(row.cost_price) || 0,
+                row.base_unit || 'pièce',
+                existing.id
+              );
+
+              results.updatedCount++;
+            }
+          } else {
+            // Generate collision-proof SKU
+            let candidateSku = `SKU-${seq}`;
+            while (db.prepare('SELECT 1 FROM products WHERE sku = ?').get(candidateSku)) {
+              seq++;
+              candidateSku = `SKU-${seq}`;
+            }
+            seq++;
+
+            const res = insertProdStmt.run(
+              row.name.trim(),
+              candidateSku,
+              cleanBc,
+              catId,
+              row.base_unit || 'pièce',
+              parseFloat(row.stock_quantity) || 0,
+              parseFloat(row.min_stock_alert) || 5,
+              parseFloat(row.cost_price) || 0,
+              parseFloat(row.selling_price) || 0,
+              row.description || '',
+              row.expiration_date || null
+            );
+
+            const newId = res.lastInsertRowid;
+            insertUnitStmt.run(
+              newId,
+              row.base_unit || 'pièce',
+              parseFloat(row.selling_price) || 0,
+              parseFloat(row.cost_price) || 0
+            );
+
+            results.importedCount++;
+          }
+        }
+      });
+
+      importTx();
+
+      // Clear cache and log audit
+      appCache.del('products:pos_all');
+      appCache.delByPrefix('products:page');
+      appCache.del('categories:all');
+
+      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(
+        'Admin',
+        `Importation Excel Produits : ${results.importedCount} créés, ${results.updatedCount} mis à jour, ${results.skippedCount} ignorés, ${results.failedCount} échecs.`
+      );
+
+      return results;
+    } catch (err) {
+      console.error('Error in products:executeExcelImport:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // 5. IPC: Download Excel Template File
+  ipcMain.handle('products:downloadExcelTemplate', async () => {
+    try {
+      const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+        title: 'Enregistrer le modèle Excel de produits',
+        defaultPath: 'modele-import-produits-imatechx.xlsx',
+        filters: [
+          { name: 'Fichier Excel (*.xlsx)', extensions: ['xlsx'] }
+        ]
+      });
+
+      if (canceled || !filePath) return { success: false, canceled: true };
+
+      const sampleData = [
+        {
+          'Nom du produit': 'Coca Cola 1L',
+          'Code-barres': '5449000000999',
+          'Catégorie': 'Boissons',
+          'Prix d\'achat': 120,
+          'Prix de vente': 150,
+          'Quantité': 50,
+          'Stock minimum': 10,
+          'Unité': 'Bouteille',
+          'Description': 'Soda gazeux frais',
+          'Date d\'expiration': '2027-12-31'
+        },
+        {
+          'Nom du produit': 'Marlboro Gold',
+          'Code-barres': '7622100800012',
+          'Catégorie': 'Tabac',
+          'Prix d\'achat': 320,
+          'Prix de vente': 350,
+          'Quantité': 100,
+          'Stock minimum': 20,
+          'Unité': 'Paquet',
+          'Description': 'Paquet de 20 cigarettes',
+          'Date d\'expiration': ''
+        },
+        {
+          'Nom du produit': 'Eau Minérale 1.5L',
+          'Code-barres': '6130000012345',
+          'Catégorie': 'Boissons',
+          'Prix d\'achat': 35,
+          'Prix de vente': 50,
+          'Quantité': 120,
+          'Stock minimum': 24,
+          'Unité': 'Bouteille',
+          'Description': 'Pack eau de source',
+          'Date d\'expiration': '2028-06-30'
+        }
+      ];
+
+      const ws = XLSX.utils.json_to_sheet(sampleData);
+
+      // Auto-fit column widths
+      ws['!cols'] = [
+        { wch: 26 }, // Nom du produit
+        { wch: 18 }, // Code-barres
+        { wch: 16 }, // Catégorie
+        { wch: 14 }, // Prix d'achat
+        { wch: 14 }, // Prix de vente
+        { wch: 12 }, // Quantité
+        { wch: 14 }, // Stock minimum
+        { wch: 12 }, // Unité
+        { wch: 28 }, // Description
+        { wch: 16 }  // Date d'expiration
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Produits');
+      const fileBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      fs.writeFileSync(filePath, fileBuffer);
+
+      return { success: true, filePath };
+    } catch (err) {
+      console.error('Error in products:downloadExcelTemplate:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // 6. IPC: Export Failed Import Rows to Excel
+  ipcMain.handle('products:exportFailedRowsExcel', async (event, failedRows) => {
+    try {
+      if (!Array.isArray(failedRows) || failedRows.length === 0) {
+        return { success: false, message: 'Aucune ligne en erreur à exporter.' };
+      }
+
+      const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+        title: 'Exporter les lignes en erreur (Excel)',
+        defaultPath: `erreurs-import-produits-${new Date().toISOString().slice(0, 10)}.xlsx`,
+        filters: [
+          { name: 'Fichier Excel (*.xlsx)', extensions: ['xlsx'] }
+        ]
+      });
+
+      if (canceled || !filePath) return { success: false, canceled: true };
+
+      const exportData = failedRows.map(r => ({
+        'Ligne Excel': r.excelRowNumber,
+        'Nom du produit': r.name || '',
+        'Code-barres': r.barcode || '',
+        'Catégorie': r.category || '',
+        'Prix d\'achat': r.cost_price || 0,
+        'Prix de vente': r.selling_price || 0,
+        'Quantité': r.stock_quantity || 0,
+        'Stock minimum': r.min_stock_alert || 0,
+        'Raison de l\'erreur': r.reason || (r.errors ? r.errors.join(' | ') : 'Erreur inconnue')
+      }));
+
+      const ws = XLSX.utils.json_to_sheet(exportData);
+      ws['!cols'] = [
+        { wch: 12 },
+        { wch: 25 },
+        { wch: 18 },
+        { wch: 16 },
+        { wch: 12 },
+        { wch: 12 },
+        { wch: 10 },
+        { wch: 12 },
+        { wch: 45 }
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Erreurs_Import');
+      const fileBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      fs.writeFileSync(filePath, fileBuffer);
+
+      return { success: true, filePath };
+    } catch (err) {
+      console.error('Error in products:exportFailedRowsExcel:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // 7. IPC: Export Products Catalog to Excel (.xlsx)
+  ipcMain.handle('products:exportProductsExcel', async (event, filters = {}) => {
+    try {
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+        title: 'Exporter le catalogue des produits (Excel)',
+        defaultPath: `catalogue-produits-${dateStr}.xlsx`,
+        filters: [
+          { name: 'Fichier Excel (*.xlsx)', extensions: ['xlsx'] }
+        ]
+      });
+
+      if (canceled || !filePath) return { success: false, canceled: true };
+
+      // Query products with category and supplier information
+      let query = `
+        SELECT 
+          p.id,
+          p.name,
+          p.sku,
+          p.barcode,
+          p.base_unit,
+          p.stock_quantity,
+          p.min_stock_alert,
+          p.cost_price,
+          p.selling_price,
+          p.status,
+          p.notes,
+          p.date_expiration,
+          c.name as category_name,
+          f.name as supplier_name
+        FROM products p
+        LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN fournisseurs f ON f.id = p.primary_supplier_id
+      `;
+
+      const conditions = [];
+      const params = [];
+
+      if (filters.search && filters.search.trim()) {
+        const s = `%${filters.search.trim()}%`;
+        conditions.push(`(p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ?)`);
+        params.push(s, s, s);
+      }
+      if (filters.categoryId && filters.categoryId !== 'all') {
+        conditions.push(`p.category_id = ?`);
+        params.push(Number(filters.categoryId));
+      }
+      if (filters.status && filters.status !== 'all') {
+        conditions.push(`p.status = ?`);
+        params.push(filters.status);
+      }
+
+      if (conditions.length > 0) {
+        query += ` WHERE ` + conditions.join(' AND ');
+      }
+      query += ` ORDER BY p.name ASC`;
+
+      const rows = db.prepare(query).all(...params);
+
+      const excelData = rows.map((p, idx) => ({
+        'N°': idx + 1,
+        'Nom du produit': p.name || '',
+        'SKU': p.sku || '',
+        'Code-barres': p.barcode || '',
+        'Catégorie': p.category_name || 'Non classé',
+        'Fournisseur': p.supplier_name || '',
+        'Prix d\'achat (DA)': p.cost_price || 0,
+        'Prix de vente (DA)': p.selling_price || 0,
+        'Marge (DA)': (p.selling_price || 0) - (p.cost_price || 0),
+        'Quantité en stock': p.stock_quantity || 0,
+        'Stock minimum': p.min_stock_alert || 0,
+        'Valeur stock Vente (DA)': ((p.stock_quantity || 0) * (p.selling_price || 0)),
+        'Valeur stock Achat (DA)': ((p.stock_quantity || 0) * (p.cost_price || 0)),
+        'Unité': p.base_unit || 'pièce',
+        'Statut': p.status === 'active' ? 'Actif' : 'Inactif',
+        'Date d\'expiration': p.date_expiration || '',
+        'Notes / Description': p.notes || ''
+      }));
+
+      const ws = XLSX.utils.json_to_sheet(excelData);
+      ws['!cols'] = [
+        { wch: 6 },  // N°
+        { wch: 28 }, // Nom
+        { wch: 14 }, // SKU
+        { wch: 18 }, // Code-barres
+        { wch: 16 }, // Catégorie
+        { wch: 20 }, // Fournisseur
+        { wch: 16 }, // P.A
+        { wch: 16 }, // P.V
+        { wch: 14 }, // Marge
+        { wch: 16 }, // Stock
+        { wch: 14 }, // Stock min
+        { wch: 20 }, // Val vente
+        { wch: 20 }, // Val achat
+        { wch: 12 }, // Unité
+        { wch: 10 }, // Statut
+        { wch: 16 }, // Expiration
+        { wch: 30 }  // Notes
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Catalogue_Produits');
+      const fileBuffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      fs.writeFileSync(filePath, fileBuffer);
+
+      return {
+        success: true,
+        filePath,
+        exportedCount: rows.length
+      };
+    } catch (err) {
+      console.error('Error in products:exportProductsExcel:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
   // Update stock quantity directly (fast inline adjustment)
   ipcMain.handle('products:updateStock', async (event, { productId, newStock, reason }) => {
     try {
@@ -3925,7 +4725,7 @@ function setupIpcHandlers() {
   // 6. Open session (can open at any time with initial cash float)
   ipcMain.handle('caisses:openSession', async (event, data) => {
     try {
-      const { caisse_id, opening_balance = 0, user_name = 'Caissier', notes = '' } = data;
+      const { caisse_id, opening_balance = 0, user_name = 'Caissier', user_id = null, notes = '' } = data;
       const caisse = db.prepare('SELECT * FROM caisses WHERE id = ?').get(caisse_id);
       if (!caisse) return { success: false, message: 'Caisse introuvable' };
 
@@ -3937,16 +4737,16 @@ function setupIpcHandlers() {
 
       const openTx = db.transaction(() => {
         const sessRes = db.prepare(`
-          INSERT INTO caisse_sessions (caisse_id, user_name, opened_at, opening_balance, status, notes)
-          VALUES (?, ?, ?, ?, 'open', ?)
-        `).run(caisse_id, user_name, now, openAmount, notes);
+          INSERT INTO caisse_sessions (caisse_id, user_id, user_name, opened_at, opening_balance, status, notes)
+          VALUES (?, ?, ?, ?, ?, 'open', ?)
+        `).run(caisse_id, user_id, user_name, now, openAmount, notes);
 
-        // Keep current caisse balance unchanged: opening float is placed into the drawer
+        // Update caisse status and assigned user
         db.prepare(`
           UPDATE caisses 
-          SET status = 'open', last_opened_at = ? 
+          SET status = 'open', last_opened_at = ?, assigned_user_id = COALESCE(?, assigned_user_id)
           WHERE id = ?
-        `).run(now, caisse_id);
+        `).run(now, user_id, caisse_id);
 
         db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(
           user_name, 
@@ -3965,6 +4765,47 @@ function setupIpcHandlers() {
     }
   });
 
+  // 6b. Start all caisses (opens all closed caisses at once)
+  ipcMain.handle('caisses:startAll', async (event, data = {}) => {
+    try {
+      const { user_id = null, user_name = 'Administrateur', notes = 'Démarrage groupé de toutes les caisses' } = data;
+      const closedCaisses = db.prepare("SELECT * FROM caisses WHERE status != 'open' OR status IS NULL").all();
+      const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      let startedCount = 0;
+
+      const runTx = db.transaction(() => {
+        for (const c of closedCaisses) {
+          const activeSess = db.prepare("SELECT id FROM caisse_sessions WHERE caisse_id = ? AND status = 'open'").get(c.id);
+          const openAmount = Number(c.current_balance) || 0;
+          if (!activeSess) {
+            db.prepare(`
+              INSERT INTO caisse_sessions (caisse_id, user_id, user_name, opened_at, opening_balance, status, notes)
+              VALUES (?, ?, ?, ?, ?, 'open', ?)
+            `).run(c.id, user_id, user_name, now, openAmount, notes);
+          }
+          db.prepare(`
+            UPDATE caisses 
+            SET status = 'open', last_opened_at = ?, assigned_user_id = COALESCE(?, assigned_user_id)
+            WHERE id = ?
+          `).run(now, user_id, c.id);
+          startedCount++;
+        }
+      });
+
+      runTx();
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('dashboard:');
+      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(
+        user_name,
+        `Démarrage de toutes les caisses (${startedCount} caisse(s) ouverte(s))`
+      );
+      return { success: true, count: startedCount, total: closedCaisses.length };
+    } catch (err) {
+      console.error('Error starting all caisses:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
   // 7. Close session (can close at any time, see what is now in drawer, adjust/correct figure, update caisse balance)
   ipcMain.handle('caisses:closeSession', async (event, data) => {
     try {
@@ -3974,7 +4815,8 @@ function setupIpcHandlers() {
         closing_balance_actual, 
         actual_balance, 
         notes = '', 
-        user_name = 'Caissier' 
+        user_name = 'Caissier',
+        user_id = null
       } = data;
       const caisse = db.prepare('SELECT * FROM caisses WHERE id = ?').get(caisse_id);
       if (!caisse) return { success: false, message: 'Caisse introuvable' };
@@ -3993,6 +4835,7 @@ function setupIpcHandlers() {
       // Compute theoretical drawer amount during this session
       let sessionIn = 0;
       let sessionOut = 0;
+      let sessionTxCount = 0;
       let openingBal = 0;
 
       if (session) {
@@ -4012,6 +4855,13 @@ function setupIpcHandlers() {
             AND type IN ('out', 'transfer_out')
         `).get(session.id, caisse_id, session.opened_at);
         sessionOut = outRow ? outRow.total : 0;
+
+        const countRow = db.prepare(`
+          SELECT COUNT(*) as cnt 
+          FROM caisse_transactions 
+          WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+        `).get(session.id, caisse_id, session.opened_at);
+        sessionTxCount = countRow ? countRow.cnt : 0;
       }
 
       // Theoretical cash in the till right now = starting float + all cash in - all cash out
@@ -4026,12 +4876,14 @@ function setupIpcHandlers() {
         const sessId = session ? session.id : null;
 
         if (sessId) {
-          // Close session
+          // Close session with full archive fields
           db.prepare(`
             UPDATE caisse_sessions 
-            SET closed_at = ?, closing_balance_expected = ?, closing_balance_actual = ?, difference = ?, status = 'closed', notes = COALESCE(notes || '', '') || ' ' || ?
+            SET closed_at = ?, closing_balance_expected = ?, closing_balance_actual = ?, difference = ?, 
+                total_in = ?, total_out = ?, transaction_count = ?, closed_by_user_id = ?, closed_by_user_name = ?,
+                status = 'closed', notes = CASE WHEN ? != '' THEN COALESCE(notes || '', '') || ' ' || ? ELSE notes END
             WHERE id = ?
-          `).run(now, expected, actual, diff, notes, sessId);
+          `).run(now, expected, actual, diff, sessionIn, sessionOut, sessionTxCount, user_id, user_name, notes, notes, sessId);
         }
 
         // If there is an ecart (discrepancy / correction), insert an adjustment transaction.
@@ -4094,26 +4946,422 @@ function setupIpcHandlers() {
     }
   });
 
-  // 8. Get sessions history
-  ipcMain.handle('caisses:getSessions', async (event, { caisse_id = 'all', limit = 20 } = {}) => {
+  // 7b. Close all open caisses at once (e.g. at logout)
+  ipcMain.handle('caisses:closeAll', async (event, data = {}) => {
     try {
-      let query = `
-        SELECT s.*, c.name as caisse_name, c.code as caisse_code
-        FROM caisse_sessions s
-        JOIN caisses c ON s.caisse_id = c.id
-      `;
+      const { user_id = null, user_name = 'Caissier', items = [], notes = 'Clôture groupée de toutes les caisses' } = data;
+      const openCaisses = db.prepare("SELECT * FROM caisses WHERE status = 'open'").all();
+      const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      const results = [];
+
+      const runTx = db.transaction(() => {
+        for (const caisse of openCaisses) {
+          const session = db.prepare("SELECT * FROM caisse_sessions WHERE caisse_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(caisse.id);
+          const itemConfig = items.find(it => Number(it.caisse_id) === Number(caisse.id));
+
+          let openingBal = 0;
+          let sessionIn = 0;
+          let sessionOut = 0;
+          let sessionTxCount = 0;
+
+          if (session) {
+            openingBal = parseFloat(session.opening_balance) || 0;
+            const inRow = db.prepare(`
+              SELECT COALESCE(SUM(amount), 0) as total 
+              FROM caisse_transactions 
+              WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+                AND type IN ('in', 'transfer_in')
+            `).get(session.id, caisse.id, session.opened_at);
+            sessionIn = inRow ? inRow.total : 0;
+
+            const outRow = db.prepare(`
+              SELECT COALESCE(SUM(amount), 0) as total 
+              FROM caisse_transactions 
+              WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+                AND type IN ('out', 'transfer_out')
+            `).get(session.id, caisse.id, session.opened_at);
+            sessionOut = outRow ? outRow.total : 0;
+
+            const countRow = db.prepare(`
+              SELECT COUNT(*) as cnt 
+              FROM caisse_transactions 
+              WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+            `).get(session.id, caisse.id, session.opened_at);
+            sessionTxCount = countRow ? countRow.cnt : 0;
+          }
+
+          const expected = openingBal + sessionIn - sessionOut;
+          const actualInput = itemConfig ? itemConfig.actual_balance : undefined;
+          const actual = (actualInput !== undefined && actualInput !== '' && !isNaN(Number(actualInput)))
+            ? Number(actualInput)
+            : expected;
+          const diff = Math.round((actual - expected) * 100) / 100;
+          const sessNotes = (itemConfig && itemConfig.notes) ? itemConfig.notes : notes;
+
+          if (session) {
+            db.prepare(`
+              UPDATE caisse_sessions 
+              SET closed_at = ?, closing_balance_expected = ?, closing_balance_actual = ?, difference = ?, 
+                  total_in = ?, total_out = ?, transaction_count = ?, closed_by_user_id = ?, closed_by_user_name = ?,
+                  status = 'closed', notes = CASE WHEN ? != '' THEN COALESCE(notes || '', '') || ' ' || ? ELSE notes END
+              WHERE id = ?
+            `).run(now, expected, actual, diff, sessionIn, sessionOut, sessionTxCount, user_id, user_name, sessNotes, sessNotes, session.id);
+          }
+
+          if (diff !== 0) {
+            let adjCat = db.prepare("SELECT id FROM caisse_transaction_categories WHERE name = 'Ajustement Écart de Caisse'").get();
+            if (!adjCat) {
+              const insCat = db.prepare("INSERT INTO caisse_transaction_categories (name, type, color, icon, description, is_system) VALUES ('Ajustement Écart de Caisse', 'both', '#f59e0b', 'alert-triangle', 'Ajustement lors de la clôture', 1)").run();
+              adjCat = { id: insCat.lastInsertRowid };
+            }
+            const adjType = diff > 0 ? 'in' : 'out';
+            const adjAmount = Math.abs(diff);
+
+            db.prepare(`
+              INSERT INTO caisse_transactions (caisse_id, session_id, type, amount, category_id, category_name, reference, description, payment_method, date, user_name)
+              VALUES (?, ?, ?, ?, ?, 'Ajustement Écart de Caisse', ?, ?, 'especes', ?, ?)
+            `).run(
+              caisse.id, 
+              session ? session.id : null, 
+              adjType, 
+              adjAmount, 
+              adjCat ? adjCat.id : null, 
+              'CLOT-' + (session ? session.id : Date.now()), 
+              `Écart de caisse clôture groupée (${diff > 0 ? '+' : ''}${diff.toFixed(2)} DA)`, 
+              now, 
+              user_name
+            );
+          }
+
+          db.prepare(`
+            UPDATE caisses 
+            SET status = 'closed', last_closed_at = ?
+            WHERE id = ?
+          `).run(now, caisse.id);
+
+          results.push({
+            caisse_id: caisse.id,
+            name: caisse.name,
+            expected,
+            actual,
+            diff
+          });
+        }
+      });
+
+      runTx();
+      appCache.delByPrefix('caisses:');
+      appCache.delByPrefix('dashboard:');
+
+      db.prepare('INSERT INTO audit_logs (user, action) VALUES (?, ?)').run(
+        user_name,
+        `Clôture groupée de toutes les caisses (${results.length} caisse(s) fermée(s))`
+      );
+
+      return { success: true, count: results.length, results };
+    } catch (err) {
+      console.error('Error in caisses:closeAll:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // 8. Get sessions archive with rich filtering & pagination
+  ipcMain.handle('caisses:getSessions', async (event, filters = {}) => {
+    try {
+      const {
+        caisse_id = 'all',
+        user_id = 'all',
+        user_name = '',
+        status = 'all',
+        datePreset = 'all',
+        startDate = '',
+        endDate = '',
+        hasDiscrepancy = 'all',
+        search = '',
+        page = 1,
+        limit = 15
+      } = filters || {};
+
+      let whereClause = ' WHERE 1=1 ';
       const params = [];
-      if (caisse_id !== 'all') {
-        query += ' WHERE s.caisse_id = ? ';
+
+      // Caisse filter
+      if (caisse_id && caisse_id !== 'all') {
+        whereClause += ' AND s.caisse_id = ? ';
         params.push(caisse_id);
       }
-      query += ' ORDER BY s.id DESC LIMIT ? ';
-      params.push(Number(limit) || 20);
 
-      const sessions = db.prepare(query).all(...params);
-      return { success: true, sessions };
+      // User filter (by id or text match)
+      if (user_id && user_id !== 'all') {
+        whereClause += ' AND (s.user_id = ? OR s.closed_by_user_id = ?) ';
+        params.push(user_id, user_id);
+      } else if (user_name && user_name.trim()) {
+        whereClause += ' AND (s.user_name LIKE ? OR s.closed_by_user_name LIKE ?) ';
+        const uPattern = `%${user_name.trim()}%`;
+        params.push(uPattern, uPattern);
+      }
+
+      // Status filter
+      if (status && status !== 'all') {
+        whereClause += ' AND s.status = ? ';
+        params.push(status);
+      }
+
+      // Discrepancy filter
+      if (hasDiscrepancy === 'discrepancy') {
+        whereClause += ' AND s.status = "closed" AND ROUND(s.difference, 2) != 0 ';
+      } else if (hasDiscrepancy === 'exact') {
+        whereClause += ' AND s.status = "closed" AND ROUND(s.difference, 2) = 0 ';
+      }
+
+      // Date presets and ranges
+      if (startDate && endDate) {
+        whereClause += ' AND date(s.opened_at) >= date(?) AND date(s.opened_at) <= date(?) ';
+        params.push(startDate, endDate);
+      } else if (startDate) {
+        whereClause += ' AND date(s.opened_at) >= date(?) ';
+        params.push(startDate);
+      } else if (endDate) {
+        whereClause += ' AND date(s.opened_at) <= date(?) ';
+        params.push(endDate);
+      } else if (datePreset && datePreset !== 'all') {
+        if (datePreset === 'today') {
+          whereClause += " AND date(s.opened_at) = date('now', 'localtime') ";
+        } else if (datePreset === 'yesterday') {
+          whereClause += " AND date(s.opened_at) = date('now', '-1 day', 'localtime') ";
+        } else if (datePreset === 'this_week') {
+          whereClause += " AND date(s.opened_at) >= date('now', '-7 days', 'localtime') ";
+        } else if (datePreset === 'this_month') {
+          whereClause += " AND strftime('%Y-%m', s.opened_at) = strftime('%Y-%m', 'now', 'localtime') ";
+        } else if (datePreset === 'last_month') {
+          whereClause += " AND strftime('%Y-%m', s.opened_at) = strftime('%Y-%m', 'now', '-1 month', 'localtime') ";
+        }
+      }
+
+      // Search keyword
+      if (search && search.trim()) {
+        const sPat = `%${search.trim()}%`;
+        whereClause += ' AND (c.name LIKE ? OR c.code LIKE ? OR s.user_name LIKE ? OR s.notes LIKE ?) ';
+        params.push(sPat, sPat, sPat, sPat);
+      }
+
+      // Count total matches
+      const countSql = `
+        SELECT COUNT(*) as total 
+        FROM caisse_sessions s
+        JOIN caisses c ON s.caisse_id = c.id
+        ${whereClause}
+      `;
+      const totalRow = db.prepare(countSql).get(...params);
+      const totalCount = totalRow ? totalRow.total : 0;
+
+      const pageNum = Math.max(1, parseInt(page, 10) || 1);
+      const limitNum = Math.max(1, Math.min(100, parseInt(limit, 10) || 15));
+      const totalPages = Math.max(1, Math.ceil(totalCount / limitNum));
+      const offset = (pageNum - 1) * limitNum;
+
+      const dataQuery = `
+        SELECT s.*, c.name as caisse_name, c.code as caisse_code,
+               u1.full_name as opening_user_full_name,
+               u2.full_name as closing_user_full_name
+        FROM caisse_sessions s
+        JOIN caisses c ON s.caisse_id = c.id
+        LEFT JOIN users u1 ON s.user_id = u1.id
+        LEFT JOIN users u2 ON s.closed_by_user_id = u2.id
+        ${whereClause}
+        ORDER BY s.id DESC 
+        LIMIT ? OFFSET ?
+      `;
+      const queryParams = [...params, limitNum, offset];
+      const rawSessions = db.prepare(dataQuery).all(...queryParams);
+
+      // Enhance sessions with movements if not yet stored
+      const sessions = rawSessions.map(s => {
+        let totalIn = parseFloat(s.total_in) || 0;
+        let totalOut = parseFloat(s.total_out) || 0;
+        let txCount = s.transaction_count || 0;
+
+        if (totalIn === 0 && totalOut === 0) {
+          const inRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) as total 
+            FROM caisse_transactions 
+            WHERE (session_id = ? OR (caisse_id = ? AND date >= ? AND (? IS NULL OR date <= ?)))
+              AND type IN ('in', 'transfer_in')
+          `).get(s.id, s.caisse_id, s.opened_at, s.closed_at, s.closed_at);
+          totalIn = inRow ? inRow.total : 0;
+
+          const outRow = db.prepare(`
+            SELECT COALESCE(SUM(amount), 0) as total 
+            FROM caisse_transactions 
+            WHERE (session_id = ? OR (caisse_id = ? AND date >= ? AND (? IS NULL OR date <= ?)))
+              AND type IN ('out', 'transfer_out')
+          `).get(s.id, s.caisse_id, s.opened_at, s.closed_at, s.closed_at);
+          totalOut = outRow ? outRow.total : 0;
+
+          const countRow = db.prepare(`
+            SELECT COUNT(*) as total 
+            FROM caisse_transactions 
+            WHERE (session_id = ? OR (caisse_id = ? AND date >= ? AND (? IS NULL OR date <= ?)))
+          `).get(s.id, s.caisse_id, s.opened_at, s.closed_at, s.closed_at);
+          txCount = countRow ? countRow.total : 0;
+        }
+
+        let durationStr = '-';
+        if (s.opened_at && s.closed_at) {
+          const tOpen = new Date(s.opened_at).getTime();
+          const tClose = new Date(s.closed_at).getTime();
+          if (!isNaN(tOpen) && !isNaN(tClose) && tClose >= tOpen) {
+            const diffMin = Math.round((tClose - tOpen) / 60000);
+            const hours = Math.floor(diffMin / 60);
+            const mins = diffMin % 60;
+            durationStr = `${hours}h ${mins}m`;
+          }
+        }
+
+        return {
+          ...s,
+          total_in: totalIn,
+          total_out: totalOut,
+          transaction_count: txCount,
+          duration: durationStr
+        };
+      });
+
+      // Compute aggregated summary stats across whole filter
+      const statsSql = `
+        SELECT 
+          COUNT(*) as total_sessions,
+          SUM(CASE WHEN s.status = 'open' THEN 1 ELSE 0 END) as open_count,
+          SUM(CASE WHEN s.status = 'closed' THEN 1 ELSE 0 END) as closed_count,
+          SUM(CASE WHEN s.status = 'closed' AND ROUND(s.difference, 2) != 0 THEN 1 ELSE 0 END) as with_diff_count,
+          COALESCE(SUM(s.opening_balance), 0) as total_opening_balance,
+          COALESCE(SUM(s.closing_balance_expected), 0) as total_expected,
+          COALESCE(SUM(s.closing_balance_actual), 0) as total_actual,
+          COALESCE(SUM(s.difference), 0) as total_difference
+        FROM caisse_sessions s
+        JOIN caisses c ON s.caisse_id = c.id
+        ${whereClause}
+      `;
+      const rawStats = db.prepare(statsSql).get(...params);
+      const stats = {
+        total_sessions: rawStats ? (rawStats.total_sessions || 0) : totalCount,
+        open_count: rawStats ? (rawStats.open_count || 0) : 0,
+        closed_count: rawStats ? (rawStats.closed_count || 0) : 0,
+        with_diff_count: rawStats ? (rawStats.with_diff_count || 0) : 0,
+        total_opening_balance: rawStats ? (rawStats.total_opening_balance || 0) : 0,
+        total_expected: rawStats ? (rawStats.total_expected || 0) : 0,
+        total_actual: rawStats ? (rawStats.total_actual || 0) : 0,
+        total_difference: rawStats ? (rawStats.total_difference || 0) : 0
+      };
+
+      return {
+        success: true,
+        sessions,
+        stats,
+        pagination: {
+          totalCount,
+          totalPages,
+          currentPage: pageNum,
+          limit: limitNum
+        }
+      };
     } catch (err) {
-      return { success: false, message: err.message, sessions: [] };
+      console.error('Error fetching caisse sessions:', err);
+      return { success: false, message: err.message, sessions: [], stats: null };
+    }
+  });
+
+  // 8b. Get full details of a specific session (timeline, transactions, breakdown)
+  ipcMain.handle('caisses:getSessionDetails', async (event, sessionId) => {
+    try {
+      const session = db.prepare(`
+        SELECT s.*, c.name as caisse_name, c.code as caisse_code,
+               u1.full_name as opening_user_full_name,
+               u2.full_name as closing_user_full_name
+        FROM caisse_sessions s
+        JOIN caisses c ON s.caisse_id = c.id
+        LEFT JOIN users u1 ON s.user_id = u1.id
+        LEFT JOIN users u2 ON s.closed_by_user_id = u2.id
+        WHERE s.id = ?
+      `).get(sessionId);
+
+      if (!session) return { success: false, message: 'Session introuvable' };
+
+      // Transactions belonging to this session
+      const transactions = db.prepare(`
+        SELECT t.*, cat.color as category_color, cat.icon as category_icon
+        FROM caisse_transactions t
+        LEFT JOIN caisse_transaction_categories cat ON t.category_id = cat.id
+        WHERE t.session_id = ? OR (t.caisse_id = ? AND t.date >= ? AND (? IS NULL OR t.date <= ?))
+        ORDER BY t.id ASC
+      `).all(session.id, session.caisse_id, session.opened_at, session.closed_at, session.closed_at);
+
+      return { success: true, session, transactions };
+    } catch (err) {
+      console.error('Error in caisses:getSessionDetails:', err);
+      return { success: false, message: err.message };
+    }
+  });
+
+  // 8c. Check active open session for user or caisse
+  ipcMain.handle('caisses:getActiveSession', async (event, { user_id, caisse_id } = {}) => {
+    try {
+      let query = `
+        SELECT s.*, c.name as caisse_name, c.code as caisse_code, c.current_balance
+        FROM caisse_sessions s
+        JOIN caisses c ON s.caisse_id = c.id
+        WHERE s.status = 'open'
+      `;
+      const params = [];
+      if (user_id) {
+        query += ' AND s.user_id = ? ';
+        params.push(user_id);
+      }
+      if (caisse_id) {
+        query += ' AND s.caisse_id = ? ';
+        params.push(caisse_id);
+      }
+      query += ' ORDER BY s.id DESC LIMIT 1 ';
+
+      let active = db.prepare(query).get(...params);
+      // Fallback: if user_id was given but has no assigned open session, check if any caisse is open
+      if (!active && user_id) {
+        active = db.prepare(`
+          SELECT s.*, c.name as caisse_name, c.code as caisse_code, c.current_balance
+          FROM caisse_sessions s
+          JOIN caisses c ON s.caisse_id = c.id
+          WHERE s.status = 'open'
+          ORDER BY s.id DESC LIMIT 1
+        `).get();
+      }
+
+      if (active) {
+        const inRow = db.prepare(`
+          SELECT COALESCE(SUM(amount), 0) as total 
+          FROM caisse_transactions 
+          WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+            AND type IN ('in', 'transfer_in')
+        `).get(active.id, active.caisse_id, active.opened_at);
+        const sessionIn = inRow ? inRow.total : 0;
+
+        const outRow = db.prepare(`
+          SELECT COALESCE(SUM(amount), 0) as total 
+          FROM caisse_transactions 
+          WHERE (session_id = ? OR (caisse_id = ? AND date >= ?))
+            AND type IN ('out', 'transfer_out')
+        `).get(active.id, active.caisse_id, active.opened_at);
+        const sessionOut = outRow ? outRow.total : 0;
+
+        const drawerExpected = (parseFloat(active.opening_balance) || 0) + sessionIn - sessionOut;
+
+        active.session_in = sessionIn;
+        active.session_out = sessionOut;
+        active.drawer_expected = drawerExpected;
+      }
+
+      return { success: true, activeSession: active || null };
+    } catch (err) {
+      return { success: false, message: err.message, activeSession: null };
     }
   });
 

@@ -130,10 +130,17 @@ function initDatabase(userDataPath) {
       closing_balance_expected REAL,
       closing_balance_actual REAL,
       difference REAL DEFAULT 0,
+      total_in REAL DEFAULT 0,
+      total_out REAL DEFAULT 0,
+      transaction_count INTEGER DEFAULT 0,
+      closed_by_user_id INTEGER,
+      closed_by_user_name TEXT,
       status TEXT NOT NULL DEFAULT 'open',
       notes TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE CASCADE
+      FOREIGN KEY (caisse_id) REFERENCES caisses(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+      FOREIGN KEY (closed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS caisse_transaction_categories (
@@ -1002,6 +1009,29 @@ function initDatabase(userDataPath) {
         helpers.addColumn('stats_inventory_summary', 'total_inventory_valuation_cost', 'REAL DEFAULT 0');
         helpers.addColumn('stats_inventory_summary', 'total_inventory_valuation_selling', 'REAL DEFAULT 0');
         helpers.addColumn('stats_inventory_summary', 'potential_margin', 'REAL DEFAULT 0');
+      }
+    },
+    // ─────────────────────────────────────────────────────────────────
+    // MIGRATION v5 — v3.4.2: Caisse Sessions Complete Archive & Movements
+    // ─────────────────────────────────────────────────────────────────
+    {
+      version: 5,
+      name: 'v3_4_2_caisse_session_archive_and_stats',
+      description: 'Adds total_in, total_out, transaction_count, closed_by_user_id, closed_by_user_name to caisse_sessions for complete archive and history',
+      up: (helpers) => {
+        helpers.addColumn('caisse_sessions', 'total_in', 'REAL DEFAULT 0');
+        helpers.addColumn('caisse_sessions', 'total_out', 'REAL DEFAULT 0');
+        helpers.addColumn('caisse_sessions', 'transaction_count', 'INTEGER DEFAULT 0');
+        helpers.addColumn('caisse_sessions', 'closed_by_user_id', 'INTEGER REFERENCES users(id) ON DELETE SET NULL');
+        helpers.addColumn('caisse_sessions', 'closed_by_user_name', 'TEXT');
+        helpers.addIndex(
+          'idx_caisse_sess_opened_at',
+          'CREATE INDEX IF NOT EXISTS idx_caisse_sess_opened_at ON caisse_sessions(opened_at)'
+        );
+        helpers.addIndex(
+          'idx_caisse_sess_caisse_status',
+          'CREATE INDEX IF NOT EXISTS idx_caisse_sess_caisse_status ON caisse_sessions(caisse_id, status)'
+        );
       }
     }
   ];
